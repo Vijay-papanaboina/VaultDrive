@@ -254,14 +254,32 @@ async function main() {
     const metaPath = path.join(resolvedOutputDir, metaFileName);
     fs.writeFileSync(metaPath, encryptedBytes);
 
-    // 5b. Encrypt and output original file payload as <ID>
+    // 5b. Encrypt filename and payload, output combined package as <ID>
+    // Encrypt filename
+    const filenameBytes = Buffer.from(origFile, "utf8");
+    const nameEnc = new Encrypter();
+    nameEnc.addRecipient(recipient);
+    const encryptedNameBytes = await nameEnc.encrypt(filenameBytes);
+
+    // Encrypt payload
     const origBytes = new Uint8Array(fs.readFileSync(origPath));
     const payloadEnc = new Encrypter();
     payloadEnc.addRecipient(recipient);
     const encryptedPayloadBytes = await payloadEnc.encrypt(origBytes);
+
+    // Combine: [4-byte big-endian name length] + [encrypted name] + [encrypted payload]
+    const lenBuffer = Buffer.alloc(4);
+    lenBuffer.writeUInt32BE(encryptedNameBytes.length, 0);
+
+    const finalBuffer = Buffer.concat([
+      lenBuffer,
+      Buffer.from(encryptedNameBytes),
+      Buffer.from(encryptedPayloadBytes),
+    ]);
+
     const payloadFileName = `${currentId}`;
     const payloadPath = path.join(resolvedOutputDir, payloadFileName);
-    fs.writeFileSync(payloadPath, encryptedPayloadBytes);
+    fs.writeFileSync(payloadPath, finalBuffer);
 
     // 6. Record mapping
     mapping[currentId] = origFile;

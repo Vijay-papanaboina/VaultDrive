@@ -10,6 +10,7 @@ import { Decrypter } from "age-encryption";
 
 const TEST_DIR = path.resolve("./ignore");
 const OUTPUT_DIR = path.resolve("./ignore/encrypted-output");
+const DECRYPTED_DIR = path.resolve("./ignore/decrypted-output");
 const PASSPHRASE = "test-secure-passphrase-12345";
 const START_ID = 100;
 
@@ -233,14 +234,34 @@ async function verifyOutput() {
       }
 
       let decryptedPayload;
+      let decryptedName = "";
       try {
-        const encryptedPayloadBytes = new Uint8Array(fs.readFileSync(payloadPath));
+        const rawBuffer = fs.readFileSync(payloadPath);
+        if (rawBuffer.length < 4) throw new Error("File too small to contain length header");
+        const nameLen = rawBuffer.readUInt32BE(0);
+        
+        if (rawBuffer.length < 4 + nameLen) throw new Error("File corrupted: length mismatch");
+        const encName = new Uint8Array(rawBuffer.subarray(4, 4 + nameLen));
+        const encPayload = new Uint8Array(rawBuffer.subarray(4 + nameLen));
+
+        // Decrypt filename
+        const nameDec = new Decrypter();
+        nameDec.addIdentity(identity);
+        const nameBytes = await nameDec.decrypt(encName);
+        decryptedName = Buffer.from(nameBytes).toString("utf8");
+
+        if (decryptedName !== originalName) {
+          throw new Error(`Filename mismatch! Decrypted: "${decryptedName}", Expected: "${originalName}"`);
+        }
+
+        // Decrypt payload
         const dec = new Decrypter();
         dec.addIdentity(identity);
-        decryptedPayload = await dec.decrypt(encryptedPayloadBytes);
-        report.payload = { status: "passed", details: "Decrypted payload successfully using derived identity key" };
+        decryptedPayload = await dec.decrypt(encPayload);
+        
+        report.payload = { status: "passed", details: `Decrypted name "${decryptedName}" and payload successfully using derived key` };
       } catch (payErr) {
-        report.payload = { status: "failed", details: `Payload decryption failed: ${payErr.message}` };
+        report.payload = { status: "failed", details: `Payload verification failed: ${payErr.message}` };
         throw payErr;
       }
 
@@ -258,6 +279,10 @@ async function verifyOutput() {
         throw new Error("Payload content mismatch");
       }
       report.payload = { status: "passed", details: `Payload bytes match the original file "${originalName}" perfectly` };
+
+      // Write decrypted payload file to disk for inspection
+      const decryptedFilePath = path.join(DECRYPTED_DIR, decryptedName);
+      fs.writeFileSync(decryptedFilePath, decryptedPayload);
 
       // Print all passed steps
       printStep("Mapping Check", report.mapping);
@@ -322,6 +347,10 @@ async function run() {
     if (fs.existsSync(OUTPUT_DIR)) {
       fs.rmSync(OUTPUT_DIR, { recursive: true, force: true });
     }
+    if (fs.existsSync(DECRYPTED_DIR)) {
+      fs.rmSync(DECRYPTED_DIR, { recursive: true, force: true });
+    }
+    fs.mkdirSync(DECRYPTED_DIR, { recursive: true });
 
     console.log("📦 Creating mock files inside ignore/ folder...");
     TEST_CASES.forEach((tc) => {
