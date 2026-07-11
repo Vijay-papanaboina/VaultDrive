@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Shield, Lock } from "lucide-react";
 import { UserMenu } from "@/components/user-menu";
+import { PassphraseGate } from "@/components/passphrase-gate";
 
 export const metadata: Metadata = {
   title: "VaultDrive — My Drive",
@@ -36,10 +37,12 @@ export default function DriveLayout({
         </div>
       </header>
 
-      {/* Main content */}
-      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6">
-        {children}
-      </main>
+      {/* Main content — gated behind passphrase */}
+      <PassphraseGate>
+        <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6">
+          {children}
+        </main>
+      </PassphraseGate>
     </div>
   );
 }
