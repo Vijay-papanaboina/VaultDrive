@@ -254,10 +254,19 @@ async function main() {
     const metaPath = path.join(resolvedOutputDir, metaFileName);
     fs.writeFileSync(metaPath, encryptedBytes);
 
+    // 5b. Encrypt and output original file payload as <ID>
+    const origBytes = new Uint8Array(fs.readFileSync(origPath));
+    const payloadEnc = new Encrypter();
+    payloadEnc.addRecipient(recipient);
+    const encryptedPayloadBytes = await payloadEnc.encrypt(origBytes);
+    const payloadFileName = `${currentId}`;
+    const payloadPath = path.join(resolvedOutputDir, payloadFileName);
+    fs.writeFileSync(payloadPath, encryptedPayloadBytes);
+
     // 6. Record mapping
     mapping[currentId] = origFile;
 
-    console.log(`  -> Encrypted to ${metaFileName} with ID ${currentId}`);
+    console.log(`  -> Encrypted to ${metaFileName} and payload ${payloadFileName} with ID ${currentId}`);
     
     // Increment ID for the next file
     currentId++;

@@ -109,7 +109,8 @@ async function verifyOutput() {
       decryption: { status: "pending", details: "" },
       unzip: { status: "pending", details: "" },
       detailsJson: { status: "pending", details: "" },
-      thumbnail: { status: "pending", details: "" }
+      thumbnail: { status: "pending", details: "" },
+      payload: { status: "pending", details: "" }
     };
 
     // Helper to print step results clearly
@@ -224,12 +225,47 @@ async function verifyOutput() {
       }
       report.thumbnail = { status: "passed", details: "Image bytes match the original webp thumbnail perfectly" };
 
+      // 6. Verify original file payload
+      const payloadPath = path.join(OUTPUT_DIR, String(fileId));
+      if (!fs.existsSync(payloadPath)) {
+        report.payload = { status: "failed", details: `Payload file not found on disk at ${payloadPath}` };
+        throw new Error("Payload file not found");
+      }
+
+      let decryptedPayload;
+      try {
+        const encryptedPayloadBytes = new Uint8Array(fs.readFileSync(payloadPath));
+        const dec = new Decrypter();
+        dec.addIdentity(identity);
+        decryptedPayload = await dec.decrypt(encryptedPayloadBytes);
+        report.payload = { status: "passed", details: "Decrypted payload successfully using derived identity key" };
+      } catch (payErr) {
+        report.payload = { status: "failed", details: `Payload decryption failed: ${payErr.message}` };
+        throw payErr;
+      }
+
+      // Compare decrypted payload bytes with original file bytes
+      let expectedPayload;
+      if (testCase) {
+        expectedPayload = Buffer.from(testCase.content);
+      } else {
+        expectedPayload = fs.readFileSync(path.join(TEST_DIR, originalName));
+      }
+
+      const isPayloadMatch = Buffer.compare(Buffer.from(decryptedPayload), expectedPayload) === 0;
+      if (!isPayloadMatch) {
+        report.payload = { status: "failed", details: "Byte mismatch! Decrypted payload does not match original file." };
+        throw new Error("Payload content mismatch");
+      }
+      report.payload = { status: "passed", details: `Payload bytes match the original file "${originalName}" perfectly` };
+
       // Print all passed steps
       printStep("Mapping Check", report.mapping);
       printStep("Age Decryption", report.decryption);
       printStep("Zip Decompression", report.unzip);
       printStep("details.json Verification", report.detailsJson);
       printStep("thumbnail.webp Verification", report.thumbnail);
+      printStep("Payload Verification", report.payload);
 
       // If this was an intentional failure case but it fully succeeded, that is an error.
       if (isIntentionalFailure) {
@@ -245,6 +281,7 @@ async function verifyOutput() {
         if (report.unzip.status !== "pending") printStep("Zip Decompression", report.unzip);
         if (report.detailsJson.status !== "pending") printStep("details.json Verification", report.detailsJson);
         if (report.thumbnail.status !== "pending") printStep("thumbnail.webp Verification", report.thumbnail);
+        if (report.payload.status !== "pending") printStep("Payload Verification", report.payload);
         
         console.log(`  \x1b[33m⚠️ Verification failed as expected!\x1b[0m`);
       } else {
@@ -255,6 +292,7 @@ async function verifyOutput() {
         if (report.unzip.status !== "pending") printStep("Zip Decompression", report.unzip);
         if (report.detailsJson.status !== "pending") printStep("details.json Verification", report.detailsJson);
         if (report.thumbnail.status !== "pending") printStep("thumbnail.webp Verification", report.thumbnail);
+        if (report.payload.status !== "pending") printStep("Payload Verification", report.payload);
         
         console.log(`  \x1b[31m❌ Verification failed!\x1b[0m error: ${err.message}`);
       }
