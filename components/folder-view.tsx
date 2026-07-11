@@ -5,7 +5,7 @@ import { useCrypto } from "@/hooks/use-crypto";
 import { MetaGrid } from "@/components/meta-grid";
 import { FolderList } from "@/components/folder-list";
 import { BreadcrumbNav } from "@/components/breadcrumb-nav";
-import type { DriveFolder, BreadcrumbItem } from "@/types";
+import type { DriveFolder, BreadcrumbItem, DriveMetaFile } from "@/types";
 import { Folder, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -13,6 +13,7 @@ interface FolderViewProps {
   folderId: string;
   initialFolders: DriveFolder[];
   breadcrumbs: BreadcrumbItem[];
+  initialMetaFiles: DriveMetaFile[]; // server-fetched list of meta files
   firstMetaFileId: string | null;
 }
 
@@ -20,10 +21,11 @@ export function FolderView({
   folderId,
   initialFolders,
   breadcrumbs,
+  initialMetaFiles,
   firstMetaFileId,
 }: FolderViewProps) {
   const { hasPassphrase } = useCrypto();
-  const { files, isLoading, error, refetch } = useMetaFiles(folderId);
+  const { files, isListLoading, isDecrypting, error, refetch } = useMetaFiles(folderId, initialMetaFiles);
 
   const hasMeta = firstMetaFileId !== null;
 
@@ -48,11 +50,18 @@ export function FolderView({
       {/* Meta files section */}
       <section>
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
-            {hasMeta
-              ? `Encrypted files${files.length > 0 ? ` (${files.length})` : ""}`
-              : "No .meta files"}
-          </h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
+              {hasMeta
+                ? `Encrypted files${files.length > 0 ? ` (${files.length})` : ""}`
+                : "No .meta files"}
+            </h2>
+            {isDecrypting && (
+              <span className="rounded-full bg-violet-500/10 px-2 py-0.5 text-[10px] font-medium text-violet-400 animate-pulse">
+                Decrypting...
+              </span>
+            )}
+          </div>
           {hasPassphrase && hasMeta && (
             <Button
               id="refetch-btn"
@@ -74,7 +83,7 @@ export function FolderView({
             </p>
           </div>
         ) : (
-          <MetaGrid files={files} isLoading={isLoading} error={error} />
+          <MetaGrid files={files} isLoading={isListLoading} error={error} />
         )}
       </section>
     </div>

@@ -43,6 +43,7 @@ export default async function FolderPage({ params }: PageProps) {
       folderId={folderId}
       initialFolders={subFolders}
       breadcrumbs={breadcrumbs}
+      initialMetaFiles={metaFiles}
       firstMetaFileId={firstMetaFileId}
     />
   );

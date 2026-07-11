@@ -26,13 +26,28 @@ export interface MetaDetails {
 }
 
 /**
- * Fully decrypted and extracted .meta file ready for display.
+ * A single file in progressive loading state.
+ * Created immediately when the Drive list is received (decrypted: false),
+ * then updated in-place as each batch of 5 finishes decrypting.
+ */
+export interface ProgressiveMetaFile {
+  driveFile: DriveMetaFile;
+  originalFileName: string;
+  decrypted: boolean;
+  details?: MetaDetails;
+  thumbnailUrl?: string | null;
+  decryptError?: string; // per-file error when this specific file fails
+}
+
+/**
+ * Fully decrypted meta — used for the detail modal.
+ * Narrowed from ProgressiveMetaFile where decrypted === true.
  */
 export interface DecryptedMeta {
   driveFile: DriveMetaFile;
   details: MetaDetails;
-  thumbnailUrl: string | null;              // blob URL — null if no thumbnail in zip
-  originalFileName: string;            // driveFile.name with .meta stripped
+  thumbnailUrl: string | null;
+  originalFileName: string;
 }
 
 // Breadcrumb path item

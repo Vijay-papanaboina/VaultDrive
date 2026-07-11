@@ -6,12 +6,12 @@ import { MetaDetailModal } from "@/components/meta-detail-modal";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { useCrypto } from "@/hooks/use-crypto";
-import type { DecryptedMeta } from "@/types";
+import type { ProgressiveMetaFile, DecryptedMeta } from "@/types";
 import { FileX, KeyRound, RotateCcw } from "lucide-react";
 
 interface MetaGridProps {
-  files: DecryptedMeta[];
-  isLoading: boolean;
+  files: ProgressiveMetaFile[];
+  isLoading: boolean; // Stage 1 generic loading (isListLoading)
   error: string | null;
 }
 
@@ -47,6 +47,17 @@ function SkeletonCard() {
 export function MetaGrid({ files, isLoading, error }: MetaGridProps) {
   const [selected, setSelected] = useState<DecryptedMeta | null>(null);
   const { clearPassphrase } = useCrypto();
+
+  const handleCardClick = (file: ProgressiveMetaFile) => {
+    if (file.decrypted && file.details && !file.decryptError) {
+      setSelected({
+        driveFile: file.driveFile,
+        details: file.details,
+        thumbnailUrl: file.thumbnailUrl ?? null,
+        originalFileName: file.originalFileName,
+      });
+    }
+  };
 
   if (error) {
     const passphraseErr = isPassphraseError(error);
@@ -125,7 +136,7 @@ export function MetaGrid({ files, isLoading, error }: MetaGridProps) {
           <MetaCard
             key={meta.driveFile.id}
             meta={meta}
-            onClick={() => setSelected(meta)}
+            onClick={() => handleCardClick(meta)}
           />
         ))}
       </div>

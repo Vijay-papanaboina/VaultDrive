@@ -3,12 +3,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { decryptMetaZip } from "@/lib/crypto";
 import { useCrypto } from "@/hooks/use-crypto";
-import type { DecryptedMeta, DriveMetaFile } from "@/types";
+import type { ProgressiveMetaFile, DriveMetaFile } from "@/types";
 
 interface UseMetaFilesResult {
-  files: DecryptedMeta[];
-  isLoading: boolean;
-  error: string | null;
+  files: ProgressiveMetaFile[];
+  isListLoading: boolean;   // Stage 1: fetching list from Drive
+  isDecrypting: boolean;    // Stage 2: decrypting files in batches
+  error: string | null;     // top-level error (list fetch failed etc.)
   refetch: () => void;
 }
 
@@ -21,39 +22,33 @@ async function fetchMetaList(folderId: string): Promise<DriveMetaFile[]> {
   return data.files as DriveMetaFile[];
 }
 
-async function fetchAndDecrypt(
-  file: DriveMetaFile,
-  passphrase: string
-): Promise<DecryptedMeta> {
-  const res = await fetch(`/api/drive/meta/${file.id}`);
-  if (!res.ok) throw new Error(`Failed to fetch ${file.name}: HTTP ${res.status}`);
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  const { details, thumbnailUrl } = await decryptMetaZip(passphrase, bytes);
-  const originalFileName = file.name.replace(/\.meta$/i, "");
-  return { driveFile: file, details, thumbnailUrl, originalFileName };
-}
-
-async function batchProcess<T, R>(
-  items: T[],
-  fn: (item: T) => Promise<R>,
-  batchSize: number
-): Promise<R[]> {
-  const results: R[] = [];
-  for (let i = 0; i < items.length; i += batchSize) {
-    const batch = items.slice(i, i + batchSize);
-    const batchResults = await Promise.all(batch.map(fn));
-    results.push(...batchResults);
-  }
-  return results;
-}
-
-export function useMetaFiles(folderId: string): UseMetaFilesResult {
+export function useMetaFiles(
+  folderId: string,
+  initialFiles?: DriveMetaFile[]
+): UseMetaFilesResult {
   const { hasPassphrase, getPassphrase } = useCrypto();
-  const [files, setFiles] = useState<DecryptedMeta[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+
+  // Helper to map raw GDrive file list to progressive loading card structure
+  const mapInitialFiles = useCallback((rawFiles: DriveMetaFile[]): ProgressiveMetaFile[] => {
+    return rawFiles.map((f) => ({
+      driveFile: f,
+      originalFileName: f.name.replace(/\.meta$/i, ""),
+      decrypted: false,
+    }));
+  }, []);
+
+  // Initialize state immediately with server-fetched list if available to avoid duplicate generic skeletons
+  const [files, setFiles] = useState<ProgressiveMetaFile[]>(() => {
+    if (initialFiles) {
+      return mapInitialFiles(initialFiles);
+    }
+    return [];
+  });
+
+  const [isListLoading, setIsListLoading] = useState(!initialFiles);
+  const [isDecrypting, setIsDecrypting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
-  // Track blob URLs so we can revoke them when component unmounts or re-fetches
   const blobUrlsRef = useRef<string[]>([]);
 
   const refetch = useCallback(() => setTick((t) => t + 1), []);
@@ -66,66 +61,100 @@ export function useMetaFiles(folderId: string): UseMetaFilesResult {
 
     let cancelled = false;
 
+    // Cleanup previous blob URLs
+    blobUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    blobUrlsRef.current = [];
+
     async function load() {
-      setIsLoading(true);
-      setError(null);
+      let metaList = initialFiles;
 
-      // Revoke previous blob URLs before loading new ones
-      blobUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-      blobUrlsRef.current = [];
-      setFiles([]);
+      // Fetch list on tick refetch or if we didn't have one initially
+      if (!metaList || tick > 0) {
+        setIsListLoading(true);
+        setIsDecrypting(false);
+        setError(null);
+        setFiles([]);
 
-      try {
-        const metaList = await fetchMetaList(folderId);
+        try {
+          metaList = await fetchMetaList(folderId);
+        } catch (err) {
+          if (!cancelled) {
+            setError(err instanceof Error ? err.message : "Failed to list files");
+            setIsListLoading(false);
+          }
+          return;
+        }
         if (cancelled) return;
 
         if (metaList.length === 0) {
           setFiles([]);
+          setIsListLoading(false);
           return;
         }
 
-        const decrypted = await batchProcess(
-          metaList,
-          (file) => fetchAndDecrypt(file, passphrase!),
-          BATCH_SIZE
+        if (!cancelled) {
+          setFiles(mapInitialFiles(metaList));
+          setIsListLoading(false);
+        }
+      }
+
+      if (cancelled) return;
+      setIsDecrypting(true);
+
+      // ── decrypt in batches, update state per batch ──────────
+      for (let i = 0; i < metaList.length; i += BATCH_SIZE) {
+        if (cancelled) break;
+        const batch = metaList.slice(i, i + BATCH_SIZE);
+
+        const results = await Promise.allSettled(
+          batch.map(async (file) => {
+            const res = await fetch(`/api/drive/meta/${file.id}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const bytes = new Uint8Array(await res.arrayBuffer());
+            return decryptMetaZip(passphrase!, bytes);
+          })
         );
 
-        if (!cancelled) {
-          // Track blob URLs for cleanup (filter out nulls — thumbnail is optional)
-          blobUrlsRef.current = decrypted
-            .map((d) => d.thumbnailUrl)
-            .filter((url): url is string => url !== null);
+        if (cancelled) break;
 
-          setFiles(
-            decrypted.sort((a, b) => {
-              const dateA = a.details.date ?? a.driveFile.modifiedTime;
-              const dateB = b.details.date ?? b.driveFile.modifiedTime;
-              return dateB.localeCompare(dateA);
-            })
-          );
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Unknown error");
-        }
-      } finally {
-        if (!cancelled) setIsLoading(false);
+        setFiles((prev) => {
+          const updated = [...prev];
+          results.forEach((result, idx) => {
+            const fileId = batch[idx].id;
+            const pos = updated.findIndex((f) => f.driveFile.id === fileId);
+            if (pos === -1) return;
+
+            if (result.status === "fulfilled") {
+              const { details, thumbnailUrl } = result.value;
+              if (thumbnailUrl) blobUrlsRef.current.push(thumbnailUrl);
+              updated[pos] = { ...updated[pos], decrypted: true, details, thumbnailUrl };
+            } else {
+              const msg = result.reason instanceof Error
+                ? result.reason.message
+                : "Decryption failed";
+              updated[pos] = { ...updated[pos], decrypted: true, decryptError: msg };
+            }
+          });
+          return updated;
+        });
       }
+
+      if (!cancelled) setIsDecrypting(false);
     }
 
     load();
 
     return () => {
       cancelled = true;
-      // Revoke all blob URLs on unmount / dependency change
       blobUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       blobUrlsRef.current = [];
     };
-  }, [folderId, hasPassphrase, getPassphrase, tick]);
+  }, [folderId, hasPassphrase, getPassphrase, tick, initialFiles, mapInitialFiles]);
 
   return {
     files: hasPassphrase ? files : [],
-    isLoading: hasPassphrase ? isLoading : false,
+    isListLoading: hasPassphrase ? isListLoading : false,
+    isDecrypting: hasPassphrase ? isDecrypting : false,
     error,
     refetch,
   };
