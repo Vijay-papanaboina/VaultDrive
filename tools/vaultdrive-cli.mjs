@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import readline from "readline";
-import { Writable } from "stream";
+import { Writable, Readable } from "stream";
 
 // Load ES module dependencies from root
 import * as fflate from "fflate";
@@ -272,25 +272,35 @@ async function main() {
     nameEnc.addRecipient(recipient);
     const encryptedNameBytes = await nameEnc.encrypt(filenameBytes);
 
-    // Encrypt payload
-    const origBytes = new Uint8Array(fs.readFileSync(origPath));
-    const payloadEnc = new Encrypter();
-    payloadEnc.addRecipient(recipient);
-    const encryptedPayloadBytes = await payloadEnc.encrypt(origBytes);
-
-    // Combine: [4-byte big-endian name length] + [encrypted name] + [encrypted payload]
-    const lenBuffer = Buffer.alloc(4);
-    lenBuffer.writeUInt32BE(encryptedNameBytes.length, 0);
-
-    const finalBuffer = Buffer.concat([
-      lenBuffer,
-      Buffer.from(encryptedNameBytes),
-      Buffer.from(encryptedPayloadBytes),
-    ]);
-
     const payloadFileName = `${currentId}`;
     const payloadPath = path.join(resolvedOutputDir, payloadFileName);
-    fs.writeFileSync(payloadPath, finalBuffer);
+    
+    // Open write stream for combined payload
+    const writeStream = fs.createWriteStream(payloadPath);
+    
+    // Write [4-byte big-endian name length]
+    const lenBuffer = Buffer.alloc(4);
+    lenBuffer.writeUInt32BE(encryptedNameBytes.length, 0);
+    writeStream.write(lenBuffer);
+    
+    // Write [encrypted name]
+    writeStream.write(Buffer.from(encryptedNameBytes));
+
+    // Stream encrypt [payload]
+    const payloadEnc = new Encrypter();
+    payloadEnc.addRecipient(recipient);
+    
+    const nodeReadStream = fs.createReadStream(origPath);
+    const webReadStream = Readable.toWeb(nodeReadStream);
+    const encryptedWebStream = await payloadEnc.encrypt(webReadStream);
+    const nodeEncryptedReadStream = Readable.fromWeb(encryptedWebStream);
+
+    await new Promise((resolve, reject) => {
+      nodeEncryptedReadStream.pipe(writeStream);
+      writeStream.on("finish", resolve);
+      nodeEncryptedReadStream.on("error", reject);
+      writeStream.on("error", reject);
+    });
 
     // 6. Record mapping
     mapping[currentId] = origFile;

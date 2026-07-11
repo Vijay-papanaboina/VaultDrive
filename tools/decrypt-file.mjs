@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import readline from "readline";
-import { Writable } from "stream";
+import { Writable, Readable } from "stream";
 
 // Load ES module dependencies from root
 import { bech32 } from "@scure/base";
@@ -90,41 +90,59 @@ Options:
 `);
 }
 
-async function decryptSingleBuffer(rawBuffer, identity) {
-  if (rawBuffer.length < 4) {
+async function decryptSingleFile(filePath, outputDir, identity) {
+  // Read first 4 bytes to get the name length
+  const fd = fs.openSync(filePath, "r");
+  const lenBuffer = Buffer.alloc(4);
+  const readLen = fs.readSync(fd, lenBuffer, 0, 4, 0);
+  if (readLen < 4) {
+    fs.closeSync(fd);
     throw new Error("File is too small to contain a valid header.");
   }
+  const nameLen = lenBuffer.readUInt32BE(0);
 
-  const nameLen = rawBuffer.readUInt32BE(0);
-  if (rawBuffer.length < 4 + nameLen) {
+  // Read the encrypted name
+  const encNameBuffer = Buffer.alloc(nameLen);
+  const readNameLen = fs.readSync(fd, encNameBuffer, 0, nameLen, 4);
+  fs.closeSync(fd);
+  if (readNameLen < nameLen) {
     throw new Error("Encrypted file is corrupted (name length mismatch).");
   }
-
-  const encNameBytes = new Uint8Array(rawBuffer.subarray(4, 4 + nameLen));
-  const encPayloadBytes = new Uint8Array(rawBuffer.subarray(4 + nameLen));
 
   // Decrypt filename
   let originalName = "";
   try {
     const nameDec = new Decrypter();
     nameDec.addIdentity(identity);
+    const encNameBytes = new Uint8Array(encNameBuffer);
     const nameBytes = await nameDec.decrypt(encNameBytes);
     originalName = Buffer.from(nameBytes).toString("utf8");
   } catch (err) {
     throw new Error("Decryption failed for filename. Wrong passphrase?");
   }
 
-  // Decrypt payload
-  let decryptedPayload;
-  try {
-    const dec = new Decrypter();
-    dec.addIdentity(identity);
-    decryptedPayload = await dec.decrypt(encPayloadBytes);
-  } catch (err) {
-    throw new Error(`Decryption failed for payload: ${err.message}`);
-  }
+  const resolvedOutputPath = path.join(outputDir, originalName);
 
-  return { originalName, decryptedPayload };
+  // Create write stream for the decrypted output file
+  const writeStream = fs.createWriteStream(resolvedOutputPath);
+
+  // Stream decrypt the rest of the file
+  const dec = new Decrypter();
+  dec.addIdentity(identity);
+
+  const nodeReadStream = fs.createReadStream(filePath, { start: 4 + nameLen });
+  const webReadStream = Readable.toWeb(nodeReadStream);
+  const decryptedWebStream = await dec.decrypt(webReadStream);
+  const nodeDecryptedReadStream = Readable.fromWeb(decryptedWebStream);
+
+  await new Promise((resolve, reject) => {
+    nodeDecryptedReadStream.pipe(writeStream);
+    writeStream.on("finish", resolve);
+    nodeDecryptedReadStream.on("error", reject);
+    writeStream.on("error", reject);
+  });
+
+  return resolvedOutputPath;
 }
 
 async function main() {
@@ -213,12 +231,7 @@ async function main() {
   for (const item of filesToDecrypt) {
     console.log(`Processing file: ${item.name}...`);
     try {
-      const rawBuffer = fs.readFileSync(item.path);
-      const { originalName, decryptedPayload } = await decryptSingleBuffer(rawBuffer, identity);
-
-      const resolvedOutputPath = path.join(outputDir, originalName);
-      fs.writeFileSync(resolvedOutputPath, decryptedPayload);
-
+      const resolvedOutputPath = await decryptSingleFile(item.path, outputDir, identity);
       console.log(`  \x1b[32m✓ Decrypted:\x1b[0m ${item.name} -> ${resolvedOutputPath}`);
       successCount++;
     } catch (err) {
