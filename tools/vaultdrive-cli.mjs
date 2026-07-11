@@ -138,6 +138,11 @@ async function main() {
       console.error("\nError: Passphrase cannot be empty.");
       process.exit(1);
     }
+    const confirm = await askPassphrase("Confirm passphrase: ");
+    if (passphrase !== confirm) {
+      console.error("\nError: Passphrases do not match.");
+      process.exit(1);
+    }
     console.log("\nDeriving keys...");
     const { identity, recipient } = await deriveAgeKeys(passphrase.trim());
     console.log(`Derived Public Key (Recipient):  ${recipient}`);
@@ -173,9 +178,14 @@ async function main() {
   }
 
   // Ask for passphrase securely
-  const passphrase = await askPassphrase("Enter decryption passphrase: ");
+  const passphrase = await askPassphrase("Enter encryption passphrase: ");
   if (!passphrase || !passphrase.trim()) {
     console.error("\nError: Passphrase cannot be empty.");
+    process.exit(1);
+  }
+  const confirm = await askPassphrase("Confirm encryption passphrase: ");
+  if (passphrase !== confirm) {
+    console.error("\nError: Passphrases do not match.");
     process.exit(1);
   }
 

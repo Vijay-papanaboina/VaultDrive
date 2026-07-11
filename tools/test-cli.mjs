@@ -56,8 +56,12 @@ async function runPackager() {
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (data) => {
       process.stdout.write(data);
-      if (data.includes("Enter decryption passphrase:")) {
+      if (data.includes("Enter encryption passphrase:")) {
         // Auto-input passphrase when prompt appears
+        child.stdin.write(PASSPHRASE + "\n");
+      }
+      if (data.includes("Confirm encryption passphrase:")) {
+        // Auto-input confirmation when prompt appears
         child.stdin.write(PASSPHRASE + "\n");
         child.stdin.end();
       }
