@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { CryptoProvider } from "@/hooks/use-crypto";
+import { QueryProvider } from "@/components/query-provider";
 
 const geistSans = Geist({
   variable: "--font-sans",
@@ -31,7 +32,9 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} dark`}
     >
       <body className="min-h-screen bg-background text-foreground antialiased">
-        <CryptoProvider>{children}</CryptoProvider>
+        <QueryProvider>
+          <CryptoProvider>{children}</CryptoProvider>
+        </QueryProvider>
       </body>
     </html>
   );

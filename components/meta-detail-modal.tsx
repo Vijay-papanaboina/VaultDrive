@@ -1,5 +1,6 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import {
   Dialog,
   DialogContent,
@@ -41,9 +42,31 @@ function formatDate(iso: string): string {
 }
 
 export function MetaDetailModal({ meta, onClose }: MetaDetailModalProps) {
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
+
+  const thumbnailBytes = meta?.thumbnailBytes;
+  const thumbnailMimeType = meta?.thumbnailMimeType;
+
+  useEffect(() => {
+    if (!thumbnailBytes) return;
+
+    const blob = new Blob([thumbnailBytes as unknown as BlobPart], { type: thumbnailMimeType ?? "image/webp" });
+    const url = URL.createObjectURL(blob);
+    
+    const handle = requestAnimationFrame(() => {
+      setThumbnailUrl(url);
+    });
+
+    return () => {
+      cancelAnimationFrame(handle);
+      URL.revokeObjectURL(url);
+      setThumbnailUrl(null);
+    };
+  }, [thumbnailBytes, thumbnailMimeType]);
+
   if (!meta) return null;
 
-  const { details, thumbnailUrl, originalFileName, driveFile } = meta;
+  const { details, originalFileName, driveFile } = meta;
 
   return (
     <Dialog open={!!meta} onOpenChange={(open) => { if (!open) onClose(); }}>

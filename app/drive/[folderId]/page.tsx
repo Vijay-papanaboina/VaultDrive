@@ -1,7 +1,7 @@
+import type { Metadata } from "next";
 import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { listFolders, listMetaFiles, getFolderPath } from "@/lib/google-drive";
 import { FolderView } from "@/components/folder-view";
 
 interface PageProps {
@@ -15,41 +15,12 @@ export default async function FolderPage({ params }: PageProps) {
   const session = await auth.api.getSession({ headers: await headers() });
   if (!session) redirect("/");
 
-  const tokenResult = await auth.api.getAccessToken({
-    headers: await headers(),
-    body: { providerId: "google" },
-  });
-
-  if (!tokenResult?.accessToken) redirect("/");
-
-  const { accessToken } = tokenResult;
-
-  // Fetch folder data in parallel
-  const [subFolders, metaFiles, breadcrumbs] = await Promise.all([
-    listFolders(accessToken, folderId).catch(() => []),
-    listMetaFiles(accessToken, folderId).catch(() => []),
-    getFolderPath(accessToken, folderId).catch(() => []),
-  ]);
-
-  // If both are empty and no breadcrumbs, folder probably doesn't exist
-  if (breadcrumbs.length === 0 && subFolders.length === 0 && metaFiles.length === 0) {
-    // Could be an empty folder — don't 404, just show empty state
-  }
-
-  const firstMetaFileId = metaFiles[0]?.id ?? null;
-
   return (
-    <FolderView
-      folderId={folderId}
-      initialFolders={subFolders}
-      breadcrumbs={breadcrumbs}
-      initialMetaFiles={metaFiles}
-      firstMetaFileId={firstMetaFileId}
-    />
+    <FolderView folderId={folderId} />
   );
 }
 
-export async function generateMetadata({ params }: PageProps) {
+export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { folderId } = await params;
   return {
     title: `VaultDrive — Folder`,

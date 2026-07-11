@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { decryptMetaZip } from "@/lib/crypto";
 import { useCrypto } from "@/hooks/use-crypto";
 import type { ProgressiveMetaFile, DriveMetaFile } from "@/types";
@@ -27,6 +28,7 @@ export function useMetaFiles(
   initialFiles?: DriveMetaFile[]
 ): UseMetaFilesResult {
   const { hasPassphrase, getPassphrase } = useCrypto();
+  const queryClient = useQueryClient();
 
   // Helper to map raw GDrive file list to progressive loading card structure
   const mapInitialFiles = useCallback((rawFiles: DriveMetaFile[]): ProgressiveMetaFile[] => {
@@ -37,74 +39,71 @@ export function useMetaFiles(
     }));
   }, []);
 
-  // Initialize state immediately with server-fetched list if available to avoid duplicate generic skeletons
-  const [files, setFiles] = useState<ProgressiveMetaFile[]>(() => {
-    if (initialFiles) {
-      return mapInitialFiles(initialFiles);
-    }
-    return [];
+  // Query 1: Fetch list of DriveMetaFile
+  const { data: driveFiles, error: listError, isLoading: isListLoading } = useQuery<DriveMetaFile[]>({
+    queryKey: ["meta-list", folderId],
+    queryFn: () => fetchMetaList(folderId),
+    enabled: !!folderId && hasPassphrase,
+    initialData: initialFiles,
   });
 
-  const [isListLoading, setIsListLoading] = useState(!initialFiles);
+  const [files, setFiles] = useState<ProgressiveMetaFile[]>([]);
   const [isDecrypting, setIsDecrypting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [tick, setTick] = useState(0);
-  const blobUrlsRef = useRef<string[]>([]);
+  const [decryptError, setDecryptError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  const refetch = useCallback(() => setTick((t) => t + 1), []);
+  const refetch = useCallback(() => {
+    setDecryptError(null);
+    queryClient.removeQueries({ queryKey: ["meta-list", folderId] });
+    queryClient.removeQueries({ queryKey: ["decrypted-folder", folderId] });
+    setRefreshKey((k) => k + 1);
+  }, [queryClient, folderId]);
 
   useEffect(() => {
-    if (!folderId || !hasPassphrase) return;
+    if (!folderId || !hasPassphrase || !driveFiles) return;
 
     const passphrase = getPassphrase();
     if (!passphrase) return;
 
     let cancelled = false;
+    const decryptedQueryKey = ["decrypted-folder", folderId];
+    const filesToDecrypt = driveFiles;
 
-    // Cleanup previous blob URLs
-    blobUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-    blobUrlsRef.current = [];
-
-    async function load() {
-      let metaList = initialFiles;
-
-      // Fetch list on tick refetch or if we didn't have one initially
-      if (!metaList || tick > 0) {
-        setIsListLoading(true);
+    async function processDecryption() {
+      // Check if we already have decrypted files in cache for this folder
+      const cached = queryClient.getQueryData<ProgressiveMetaFile[]>(decryptedQueryKey);
+      if (cached && cached.length === filesToDecrypt.length && cached.every((f) => f.decrypted)) {
+        setFiles(cached);
         setIsDecrypting(false);
-        setError(null);
-        setFiles([]);
-
-        try {
-          metaList = await fetchMetaList(folderId);
-        } catch (err) {
-          if (!cancelled) {
-            setError(err instanceof Error ? err.message : "Failed to list files");
-            setIsListLoading(false);
-          }
-          return;
-        }
-        if (cancelled) return;
-
-        if (metaList.length === 0) {
-          setFiles([]);
-          setIsListLoading(false);
-          return;
-        }
-
-        if (!cancelled) {
-          setFiles(mapInitialFiles(metaList));
-          setIsListLoading(false);
-        }
+        return;
       }
 
-      if (cancelled) return;
-      setIsDecrypting(true);
+      // Initialize list (use cached if partially decrypted, otherwise map initial)
+      const currentFiles = cached && cached.length === filesToDecrypt.length
+        ? cached
+        : mapInitialFiles(filesToDecrypt);
 
-      // ── decrypt in batches, update state per batch ──────────
-      for (let i = 0; i < metaList.length; i += BATCH_SIZE) {
+      setFiles(currentFiles);
+
+      const firstUndecryptedIdx = currentFiles.findIndex((f) => !f.decrypted);
+      if (firstUndecryptedIdx === -1) {
+        setIsDecrypting(false);
+        return;
+      }
+
+      setIsDecrypting(true);
+      setDecryptError(null);
+
+      // Decrypt in batches, starting from first undecrypted
+      for (let i = 0; i < filesToDecrypt.length; i += BATCH_SIZE) {
         if (cancelled) break;
-        const batch = metaList.slice(i, i + BATCH_SIZE);
+
+        const batch = filesToDecrypt.slice(i, i + BATCH_SIZE);
+        const isBatchDecrypted = batch.every((file) => {
+          const match = currentFiles.find((f) => f.driveFile.id === file.id);
+          return match && match.decrypted;
+        });
+        if (isBatchDecrypted) continue;
 
         const results = await Promise.allSettled(
           batch.map(async (file) => {
@@ -125,16 +124,28 @@ export function useMetaFiles(
             if (pos === -1) return;
 
             if (result.status === "fulfilled") {
-              const { details, thumbnailUrl } = result.value;
-              if (thumbnailUrl) blobUrlsRef.current.push(thumbnailUrl);
-              updated[pos] = { ...updated[pos], decrypted: true, details, thumbnailUrl };
+              const { details, thumbnailBytes, thumbnailMimeType } = result.value;
+              updated[pos] = {
+                ...updated[pos],
+                decrypted: true,
+                details,
+                thumbnailBytes,
+                thumbnailMimeType,
+              };
             } else {
               const msg = result.reason instanceof Error
                 ? result.reason.message
                 : "Decryption failed";
-              updated[pos] = { ...updated[pos], decrypted: true, decryptError: msg };
+              updated[pos] = {
+                ...updated[pos],
+                decrypted: true,
+                decryptError: msg,
+              };
             }
           });
+
+          // Save progressive state to React Query Cache
+          queryClient.setQueryData(decryptedQueryKey, updated);
           return updated;
         });
       }
@@ -142,20 +153,31 @@ export function useMetaFiles(
       if (!cancelled) setIsDecrypting(false);
     }
 
-    load();
+    processDecryption();
 
     return () => {
       cancelled = true;
-      blobUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-      blobUrlsRef.current = [];
     };
-  }, [folderId, hasPassphrase, getPassphrase, tick, initialFiles, mapInitialFiles]);
+  }, [
+    folderId,
+    hasPassphrase,
+    driveFiles,
+    getPassphrase,
+    queryClient,
+    mapInitialFiles,
+    refreshKey,
+  ]);
+
+  const queryError = listError || decryptError;
+  const errorMsg = queryError
+    ? queryError instanceof Error ? queryError.message : String(queryError)
+    : null;
 
   return {
     files: hasPassphrase ? files : [],
     isListLoading: hasPassphrase ? isListLoading : false,
     isDecrypting: hasPassphrase ? isDecrypting : false,
-    error,
+    error: errorMsg,
     refetch,
   };
 }

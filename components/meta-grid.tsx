@@ -53,7 +53,8 @@ export function MetaGrid({ files, isLoading, error }: MetaGridProps) {
       setSelected({
         driveFile: file.driveFile,
         details: file.details,
-        thumbnailUrl: file.thumbnailUrl ?? null,
+        thumbnailBytes: file.thumbnailBytes ?? null,
+        thumbnailMimeType: file.thumbnailMimeType ?? null,
         originalFileName: file.originalFileName,
       });
     }
@@ -95,7 +96,7 @@ export function MetaGrid({ files, isLoading, error }: MetaGridProps) {
             variant="outline"
             size="sm"
             className="gap-2 border-amber-500/30 text-amber-400 hover:bg-amber-500/10 hover:text-amber-300"
-            onClick={clearPassphrase}
+            onClick={() => clearPassphrase()}
           >
             <RotateCcw className="h-3.5 w-3.5" />
             Re-enter passphrase

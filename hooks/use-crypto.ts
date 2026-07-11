@@ -8,12 +8,17 @@ import React, {
   ReactNode,
 } from "react";
 import { deriveAgeIdentity } from "@/lib/crypto";
+import { useQueryClient } from "@tanstack/react-query";
 
 interface CryptoContextValue {
   hasPassphrase: boolean;
   getPassphrase: () => string | null;
   setPassphrase: (pw: string) => Promise<void>;
-  clearPassphrase: () => void;
+  clearPassphrase: (errorMsg?: string) => void;
+  passphraseError: string | null;
+  clearPassphraseError: () => void;
+  dismissedPassphraseError: boolean;
+  setDismissedPassphraseError: (val: boolean) => void;
 }
 
 const CryptoContext = createContext<CryptoContextValue | null>(null);
@@ -23,6 +28,10 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
   const identityRef = useRef<string | null>(null);
   // useState for reactivity (so UI re-renders when passphrase is set/cleared)
   const [hasPassphrase, setHasPassphrase] = useState(false);
+  const [passphraseError, setPassphraseError] = useState<string | null>(null);
+  const [dismissedPassphraseError, setDismissedPassphraseError] = useState(false);
+
+  const queryClient = useQueryClient();
 
   function getPassphrase() {
     return identityRef.current;
@@ -32,16 +41,39 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
     const identity = await deriveAgeIdentity(pw);
     identityRef.current = identity;
     setHasPassphrase(true);
+    setPassphraseError(null);
+    setDismissedPassphraseError(false);
   }
 
-  function clearPassphrase() {
+  function clearPassphrase(errorMsg?: string) {
     identityRef.current = null;
     setHasPassphrase(false);
+    queryClient.clear();
+    if (typeof errorMsg === "string") {
+      setPassphraseError(errorMsg);
+    } else {
+      setPassphraseError(null);
+    }
+  }
+
+  function clearPassphraseError() {
+    setPassphraseError(null);
   }
 
   return React.createElement(
     CryptoContext.Provider,
-    { value: { hasPassphrase, getPassphrase, setPassphrase, clearPassphrase } },
+    {
+      value: {
+        hasPassphrase,
+        getPassphrase,
+        setPassphrase,
+        clearPassphrase,
+        passphraseError,
+        clearPassphraseError,
+        dismissedPassphraseError,
+        setDismissedPassphraseError,
+      },
+    },
     children
   );
 }

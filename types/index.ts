@@ -35,7 +35,8 @@ export interface ProgressiveMetaFile {
   originalFileName: string;
   decrypted: boolean;
   details?: MetaDetails;
-  thumbnailUrl?: string | null;
+  thumbnailBytes?: Uint8Array | null;
+  thumbnailMimeType?: string | null;
   decryptError?: string; // per-file error when this specific file fails
 }
 
@@ -46,7 +47,8 @@ export interface ProgressiveMetaFile {
 export interface DecryptedMeta {
   driveFile: DriveMetaFile;
   details: MetaDetails;
-  thumbnailUrl: string | null;
+  thumbnailBytes: Uint8Array | null;
+  thumbnailMimeType: string | null;
   originalFileName: string;
 }
 

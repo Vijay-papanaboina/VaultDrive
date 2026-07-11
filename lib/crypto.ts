@@ -24,7 +24,8 @@ function getMimeType(filename: string): string {
 
 export interface DecryptedZipResult {
   details: MetaDetails;
-  thumbnailUrl: string | null; // null when zip contains no image
+  thumbnailBytes: Uint8Array | null;
+  thumbnailMimeType: string | null;
 }
 
 /**
@@ -93,14 +94,15 @@ export async function decryptMetaZip(
   const thumbEntry = Object.entries(files).find(
     ([name]) => name !== "details.json" && IMAGE_EXTS.test(name)
   );
-  let thumbnailUrl: string | null = null;
+  let thumbnailBytes: Uint8Array | null = null;
+  let thumbnailMimeType: string | null = null;
   if (thumbEntry) {
     const [thumbName, thumbBytes] = thumbEntry;
-    const blob = new Blob([thumbBytes], { type: getMimeType(thumbName) });
-    thumbnailUrl = URL.createObjectURL(blob);
+    thumbnailBytes = thumbBytes;
+    thumbnailMimeType = getMimeType(thumbName);
   }
 
-  return { details, thumbnailUrl };
+  return { details, thumbnailBytes, thumbnailMimeType };
 }
 
 /**
@@ -116,9 +118,7 @@ export async function validatePassphrase(
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const bytes = new Uint8Array(await res.arrayBuffer());
     const identity = await deriveAgeIdentity(passphrase);
-    const result = await decryptMetaZip(identity, bytes);
-    // Revoke blob URL if present — not needed for validation
-    if (result.thumbnailUrl) URL.revokeObjectURL(result.thumbnailUrl);
+    await decryptMetaZip(identity, bytes);
     return true;
   } catch (err) {
     const msg = err instanceof Error ? err.message.toLowerCase() : "";

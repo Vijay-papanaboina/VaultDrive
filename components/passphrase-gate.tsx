@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Eye, EyeOff, KeyRound, Loader2 } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Loader2, ShieldAlert } from "lucide-react";
 
 /**
  * Global passphrase gate — shown immediately on /drive entry (login or refresh).
@@ -19,7 +19,7 @@ import { Eye, EyeOff, KeyRound, Loader2 } from "lucide-react";
  * surface naturally per-card when decryption fails.
  */
 export function PassphraseGate({ children }: { children: React.ReactNode }) {
-  const { hasPassphrase, setPassphrase } = useCrypto();
+  const { hasPassphrase, setPassphrase, passphraseError, clearPassphraseError } = useCrypto();
   const [value, setValue] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -74,7 +74,10 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
                 type={showPw ? "text" : "password"}
                 placeholder="Your age passphrase…"
                 value={value}
-                onChange={(e) => setValue(e.target.value)}
+                onChange={(e) => {
+                  setValue(e.target.value);
+                  if (passphraseError) clearPassphraseError();
+                }}
                 autoFocus
                 autoComplete="off"
                 className="pr-10"
@@ -93,6 +96,13 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
                 )}
               </button>
             </div>
+
+            {passphraseError && (
+              <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                {passphraseError}
+              </div>
+            )}
 
             <Button
               id="passphrase-submit-btn"

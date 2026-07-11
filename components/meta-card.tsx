@@ -1,5 +1,6 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -32,7 +33,25 @@ function formatDate(iso: string): string {
 }
 
 export function MetaCard({ meta, onClick }: MetaCardProps) {
-  const { driveFile, originalFileName, decrypted, details, thumbnailUrl, decryptError } = meta;
+  const { driveFile, originalFileName, decrypted, details, thumbnailBytes, thumbnailMimeType, decryptError } = meta;
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!thumbnailBytes) return;
+
+    const blob = new Blob([thumbnailBytes as unknown as BlobPart], { type: thumbnailMimeType ?? "image/webp" });
+    const url = URL.createObjectURL(blob);
+    
+    const handle = requestAnimationFrame(() => {
+      setThumbnailUrl(url);
+    });
+
+    return () => {
+      cancelAnimationFrame(handle);
+      URL.revokeObjectURL(url);
+      setThumbnailUrl(null);
+    };
+  }, [thumbnailBytes, thumbnailMimeType]);
 
   const isClickable = decrypted && !decryptError;
 
