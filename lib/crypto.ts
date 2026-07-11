@@ -1,54 +1,81 @@
 "use client";
 
 import { Decrypter } from "age-encryption";
-import type { MetaFileContent } from "@/types";
+import { unzipSync } from "fflate";
+import type { MetaDetails } from "@/types";
 
-/**
- * Decrypt an age-encrypted .meta file using a passphrase.
- *
- * The age-encryption library handles the entire age format:
- *  - Parses the age header (version line + scrypt recipient stanza)
- *  - Derives the key using scrypt (parameters read from the header)
- *  - Decrypts the payload using ChaCha20-Poly1305
- *  - Verifies the authentication tag
- *
- * Throws if the passphrase is wrong or the data is corrupt.
- */
-export async function decryptMetaFile(
-  passphrase: string,
-  encryptedData: Uint8Array
-): Promise<MetaFileContent> {
-  const d = new Decrypter();
-  d.addPassphrase(passphrase);
+const IMAGE_EXTS = /\.(webp|jpg|jpeg|png|gif|avif|bmp|svg)$/i;
 
-  // decrypt() returns plaintext as string when second arg is "text"
-  const plaintext = await d.decrypt(encryptedData, "text");
+function getMimeType(filename: string): string {
+  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+  const map: Record<string, string> = {
+    webp: "image/webp",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    gif: "image/gif",
+    avif: "image/avif",
+    bmp: "image/bmp",
+    svg: "image/svg+xml",
+  };
+  return map[ext] ?? "image/jpeg";
+}
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(plaintext);
-  } catch {
-    throw new Error("Decrypted content is not valid JSON");
-  }
-
-  // Basic shape validation
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("Unexpected decrypted format");
-  }
-  const obj = parsed as Record<string, unknown>;
-  if (typeof obj.name !== "string") {
-    throw new Error('Missing required field "name" in meta content');
-  }
-  if (typeof obj.thumbnail !== "string") {
-    throw new Error('Missing required field "thumbnail" in meta content');
-  }
-
-  return parsed as MetaFileContent;
+export interface DecryptedZipResult {
+  details: MetaDetails;
+  thumbnailUrl: string; // blob URL — caller must revoke when done
 }
 
 /**
- * Validate passphrase by attempting to decrypt the first file in a list.
- * Returns true on success, false on wrong passphrase, throws on other errors.
+ * Decrypt an age-encrypted zip .meta file.
+ *
+ * Flow:
+ *  1. age decrypt (scrypt key derivation + ChaCha20-Poly1305)
+ *  2. fflate unzip — zip is used as a container, not for compression
+ *  3. Extract details.json → parse as MetaDetails
+ *  4. Find thumbnail.* → create blob URL
+ */
+export async function decryptMetaZip(
+  passphrase: string,
+  encryptedData: Uint8Array
+): Promise<DecryptedZipResult> {
+  // Step 1: age decrypt
+  const d = new Decrypter();
+  d.addPassphrase(passphrase);
+  const zipBytes = await d.decrypt(encryptedData);
+
+  // Step 2: unzip
+  const files = unzipSync(zipBytes);
+
+  // Step 3: parse details.json
+  const detailsBytes = files["details.json"];
+  if (!detailsBytes) {
+    throw new Error("details.json not found in meta zip");
+  }
+  const details: MetaDetails = JSON.parse(
+    new TextDecoder().decode(detailsBytes)
+  );
+  if (typeof details.name !== "string") {
+    throw new Error('details.json missing required "name" field');
+  }
+
+  // Step 4: find thumbnail (any image file that isn't details.json)
+  const thumbEntry = Object.entries(files).find(
+    ([name]) => name !== "details.json" && IMAGE_EXTS.test(name)
+  );
+  if (!thumbEntry) {
+    throw new Error("No thumbnail image found in meta zip");
+  }
+  const [thumbName, thumbBytes] = thumbEntry;
+  const blob = new Blob([thumbBytes], { type: getMimeType(thumbName) });
+  const thumbnailUrl = URL.createObjectURL(blob);
+
+  return { details, thumbnailUrl };
+}
+
+/**
+ * Validate a passphrase by attempting to decrypt a test file.
+ * Returns true on success, false on wrong passphrase.
  */
 export async function validatePassphrase(
   passphrase: string,
@@ -58,20 +85,23 @@ export async function validatePassphrase(
     const res = await fetch(`/api/drive/meta/${testFileId}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const bytes = new Uint8Array(await res.arrayBuffer());
-    await decryptMetaFile(passphrase, bytes);
+    const result = await decryptMetaZip(passphrase, bytes);
+    // Revoke the blob URL immediately — we don't need it for validation
+    URL.revokeObjectURL(result.thumbnailUrl);
     return true;
   } catch (err) {
-    // age-encryption throws a generic Error with message like "incorrect passphrase"
     const msg = err instanceof Error ? err.message.toLowerCase() : "";
     if (
       msg.includes("passphrase") ||
       msg.includes("decrypt") ||
       msg.includes("header") ||
       msg.includes("mac") ||
-      msg.includes("invalid")
+      msg.includes("invalid") ||
+      msg.includes("details.json") ||
+      msg.includes("thumbnail")
     ) {
       return false;
     }
-    throw err; // re-throw unexpected errors (network, JSON parse, etc.)
+    throw err;
   }
 }

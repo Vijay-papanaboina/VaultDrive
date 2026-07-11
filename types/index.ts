@@ -10,24 +10,29 @@ export interface DriveFolder {
 export interface DriveMetaFile {
   id: string;
   name: string; // e.g. "backup.enc.meta"
-  size: string; // Drive returns size as string
+  size: string;
   modifiedTime: string;
 }
 
-// Decrypted .meta file content (confirmed schema)
-export interface MetaFileContent {
-  name: string; // required — original filename
-  description?: string; // optional
-  date?: string; // optional — ISO string
-  thumbnail: string; // required — base64 image
-  extra?: Record<string, unknown>; // optional key-value pairs
+/**
+ * Parsed contents of details.json inside the .meta zip.
+ * No thumbnail here — it's a separate file (thumbnail.webp/.jpg/.png etc.)
+ */
+export interface MetaDetails {
+  name: string;                        // required — original filename
+  description?: string;                // optional
+  date?: string;                       // optional — ISO string
+  extra?: Record<string, unknown>;     // optional — any key-value pairs
 }
 
-// Combined type used by UI cards
+/**
+ * Fully decrypted and extracted .meta file ready for display.
+ */
 export interface DecryptedMeta {
   driveFile: DriveMetaFile;
-  content: MetaFileContent;
-  originalFileName: string; // driveFile.name with .meta stripped
+  details: MetaDetails;
+  thumbnailUrl: string;                // blob URL — must be revoked on unmount
+  originalFileName: string;            // driveFile.name with .meta stripped
 }
 
 // Breadcrumb path item
@@ -38,6 +43,12 @@ export interface BreadcrumbItem {
 
 // Drive API list response
 export interface DriveListResponse {
-  files: Array<{ id: string; name: string; size?: string; modifiedTime?: string; parents?: string[] }>;
+  files: Array<{
+    id: string;
+    name: string;
+    size?: string;
+    modifiedTime?: string;
+    parents?: string[];
+  }>;
   nextPageToken?: string;
 }
