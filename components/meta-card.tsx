@@ -5,11 +5,13 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { ProgressiveMetaFile } from "@/types";
-import { Calendar, HardDrive, FileArchive, ShieldAlert } from "lucide-react";
+import { Calendar, HardDrive, FileArchive, ShieldAlert, Check } from "lucide-react";
 
 interface MetaCardProps {
   meta: ProgressiveMetaFile;
   onClick: () => void;
+  isSelectionMode?: boolean;
+  isSelected?: boolean;
 }
 
 function formatBytes(bytes: number): string {
@@ -32,7 +34,7 @@ function formatDate(iso: string): string {
   }
 }
 
-export function MetaCard({ meta, onClick }: MetaCardProps) {
+export function MetaCard({ meta, onClick, isSelectionMode = false, isSelected = false }: MetaCardProps) {
   const { driveFile, originalFileName, decrypted, details, thumbnailBytes, thumbnailMimeType, decryptError } = meta;
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
 
@@ -53,7 +55,7 @@ export function MetaCard({ meta, onClick }: MetaCardProps) {
     };
   }, [thumbnailBytes, thumbnailMimeType]);
 
-  const isClickable = decrypted && !decryptError;
+  const isClickable = isSelectionMode || (decrypted && !decryptError);
 
   return (
     <Card
@@ -66,14 +68,33 @@ export function MetaCard({ meta, onClick }: MetaCardProps) {
           onClick();
         }
       }}
-      className={`group flex flex-col overflow-hidden border-white/8 bg-white/3 backdrop-blur-sm transition-all duration-200 ${
+      className={`group flex flex-col overflow-hidden transition-all duration-200 ${
         isClickable
-          ? "cursor-pointer hover:border-violet-500/30 hover:bg-white/5 hover:shadow-lg hover:shadow-violet-500/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          ? "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           : "pointer-events-none select-none"
+      } ${
+        isSelected
+          ? "border-violet-500 bg-violet-600/5 shadow-md shadow-violet-500/5"
+          : "border-white/8 bg-white/3 hover:border-violet-500/30 hover:bg-white/5 hover:shadow-lg hover:shadow-violet-500/5"
       }`}
     >
       {/* Thumbnail or Skeleton/Error */}
       <div className="relative aspect-video w-full overflow-hidden bg-black/30">
+        {/* Selection Checkbox Overlay */}
+        {isSelectionMode && (
+          <div className="absolute left-2.5 top-2.5 z-10">
+            <div
+              className={`flex h-5 w-5 items-center justify-center rounded-full border transition-all ${
+                isSelected
+                  ? "bg-violet-500 border-violet-500 text-white"
+                  : "bg-black/40 border-white/30 group-hover:border-white/50 text-transparent"
+              }`}
+            >
+              <Check className="h-3 w-3 stroke-[3]" />
+            </div>
+          </div>
+        )}
+
         {!decrypted ? (
           <Skeleton className="h-full w-full rounded-none" />
         ) : decryptError ? (
@@ -100,7 +121,7 @@ export function MetaCard({ meta, onClick }: MetaCardProps) {
         {isClickable && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
             <span className="rounded-full border border-white/30 bg-black/50 px-3 py-1 text-xs font-medium text-white backdrop-blur-sm">
-              View details
+              {isSelectionMode ? (isSelected ? "Deselect file" : "Select file") : "View details"}
             </span>
           </div>
         )}

@@ -8,11 +8,13 @@ import { Button } from "@/components/ui/button";
 import { useCrypto } from "@/hooks/use-crypto";
 import type { ProgressiveMetaFile, DecryptedMeta } from "@/types";
 import { FileX, KeyRound, RotateCcw } from "lucide-react";
+import { useSelection } from "@/components/selection-provider";
 
 interface MetaGridProps {
   files: ProgressiveMetaFile[];
   isLoading: boolean; // Stage 1 generic loading (isListLoading)
   error: string | null;
+  relativePath: string;
 }
 
 /** Detect age decryption failure (wrong passphrase), not format errors */
@@ -44,19 +46,29 @@ function SkeletonCard() {
   );
 }
 
-export function MetaGrid({ files, isLoading, error }: MetaGridProps) {
+export function MetaGrid({ files, isLoading, error, relativePath }: MetaGridProps) {
   const [selected, setSelected] = useState<DecryptedMeta | null>(null);
   const { clearPassphrase } = useCrypto();
+  const { isSelectionMode, isFileSelected, toggleFileSelection } = useSelection();
 
   const handleCardClick = (file: ProgressiveMetaFile) => {
-    if (file.decrypted && file.details && !file.decryptError) {
-      setSelected({
-        driveFile: file.driveFile,
-        details: file.details,
-        thumbnailBytes: file.thumbnailBytes ?? null,
-        thumbnailMimeType: file.thumbnailMimeType ?? null,
-        originalFileName: file.originalFileName,
+    const fileId = file.driveFile.name.replace(".meta", "");
+    if (isSelectionMode) {
+      toggleFileSelection({
+        id: fileId,
+        name: file.originalFileName,
+        relativePath,
       });
+    } else {
+      if (file.decrypted && file.details && !file.decryptError) {
+        setSelected({
+          driveFile: file.driveFile,
+          details: file.details,
+          thumbnailBytes: file.thumbnailBytes ?? null,
+          thumbnailMimeType: file.thumbnailMimeType ?? null,
+          originalFileName: file.originalFileName,
+        });
+      }
     }
   };
 
@@ -133,13 +145,18 @@ export function MetaGrid({ files, isLoading, error }: MetaGridProps) {
   return (
     <>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {files.map((meta) => (
-          <MetaCard
-            key={meta.driveFile.id}
-            meta={meta}
-            onClick={() => handleCardClick(meta)}
-          />
-        ))}
+        {files.map((meta) => {
+          const fileId = meta.driveFile.name.replace(".meta", "");
+          return (
+            <MetaCard
+              key={meta.driveFile.id}
+              meta={meta}
+              isSelectionMode={isSelectionMode}
+              isSelected={isFileSelected(fileId)}
+              onClick={() => handleCardClick(meta)}
+            />
+          );
+        })}
       </div>
 
       <MetaDetailModal

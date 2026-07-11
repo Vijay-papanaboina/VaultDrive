@@ -60,6 +60,8 @@ export function FolderView({ folderId }: FolderViewProps) {
 
   const { files, isListLoading, isDecrypting, error: metaError, refetch } = useMetaFiles(folderId);
 
+  const relativePath = breadcrumbs.map((b) => b.name).join("/");
+
   const isLoading = isFoldersLoading || isPathLoading || isListLoading;
 
   if (isLoading) {
@@ -86,41 +88,33 @@ export function FolderView({ folderId }: FolderViewProps) {
       {/* Breadcrumb */}
       {breadcrumbs.length > 0 && <BreadcrumbNav path={breadcrumbs} />}
 
-      {/* Subfolder section */}
+      {/* Subfolders List */}
       {subFolders.length > 0 && (
-        <section>
-          <div className="mb-3 flex items-center gap-2">
+        <section className="space-y-3">
+          <div className="flex items-center gap-2">
             <Folder className="h-4 w-4 text-muted-foreground" />
-            <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
-              Folders ({subFolders.length})
+            <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+              Folders
             </h2>
           </div>
           <FolderList folders={subFolders} />
         </section>
       )}
 
-      {/* Meta files section */}
-      <section>
-        <div className="mb-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
-              {showMetaSection
-                ? `Encrypted files${files.length > 0 ? ` (${files.length})` : ""}`
-                : "No .meta files"}
-            </h2>
-            {isDecrypting && (
-              <span className="rounded-full bg-violet-500/10 px-2 py-0.5 text-[10px] font-medium text-violet-400 animate-pulse">
-                Decrypting...
-              </span>
-            )}
-          </div>
-          {hasPassphrase && showMetaSection && (
+      {/* Meta Files Grid */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+            Files
+          </h2>
+          {showMetaSection && (
             <Button
-              id="refetch-btn"
-              variant="ghost"
-              size="sm"
-              onClick={refetch}
-              className="gap-1.5 text-xs text-muted-foreground"
+              id="refresh-meta-btn"
+              variant="outline"
+              size="xs"
+              className="gap-1 bg-white/5 border-white/10 text-muted-foreground hover:bg-white/10 hover:text-foreground"
+              disabled={isListLoading || isDecrypting}
+              onClick={() => refetch()}
             >
               <RefreshCw className="h-3 w-3" />
               Refresh
@@ -135,7 +129,7 @@ export function FolderView({ folderId }: FolderViewProps) {
             </p>
           </div>
         ) : (
-          <MetaGrid files={files} isLoading={isListLoading} error={combinedError} />
+          <MetaGrid files={files} isLoading={isListLoading} error={combinedError} relativePath={relativePath} />
         )}
       </section>
 
