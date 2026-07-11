@@ -3,7 +3,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import type { DecryptedMeta } from "@/types";
-import { Calendar, HardDrive } from "lucide-react";
+import { Calendar, HardDrive, FileArchive } from "lucide-react";
 
 interface MetaCardProps {
   meta: DecryptedMeta;
@@ -44,12 +44,18 @@ export function MetaCard({ meta, onClick }: MetaCardProps) {
     >
       {/* Thumbnail */}
       <div className="relative aspect-video w-full overflow-hidden bg-black/30">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={thumbnailUrl}
-          alt={`Thumbnail for ${originalFileName}`}
-          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-        />
+        {thumbnailUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={thumbnailUrl}
+            alt={`Thumbnail for ${originalFileName}`}
+            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center">
+            <FileArchive className="h-10 w-10 text-muted-foreground/30" />
+          </div>
+        )}
         {/* Hover overlay */}
         <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
           <span className="rounded-full border border-white/30 bg-black/50 px-3 py-1 text-xs font-medium text-white backdrop-blur-sm">

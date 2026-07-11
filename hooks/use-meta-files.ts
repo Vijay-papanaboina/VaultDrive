@@ -91,8 +91,10 @@ export function useMetaFiles(folderId: string): UseMetaFilesResult {
         );
 
         if (!cancelled) {
-          // Track blob URLs for cleanup
-          blobUrlsRef.current = decrypted.map((d) => d.thumbnailUrl);
+          // Track blob URLs for cleanup (filter out nulls — thumbnail is optional)
+          blobUrlsRef.current = decrypted
+            .map((d) => d.thumbnailUrl)
+            .filter((url): url is string => url !== null);
 
           setFiles(
             decrypted.sort((a, b) => {

@@ -23,7 +23,7 @@ function getMimeType(filename: string): string {
 
 export interface DecryptedZipResult {
   details: MetaDetails;
-  thumbnailUrl: string; // blob URL — caller must revoke when done
+  thumbnailUrl: string | null; // null when zip contains no image
 }
 
 /**
@@ -59,16 +59,16 @@ export async function decryptMetaZip(
     throw new Error('details.json missing required "name" field');
   }
 
-  // Step 4: find thumbnail (any image file that isn't details.json)
+  // Step 4: find thumbnail (optional — any image file that isn't details.json)
   const thumbEntry = Object.entries(files).find(
     ([name]) => name !== "details.json" && IMAGE_EXTS.test(name)
   );
-  if (!thumbEntry) {
-    throw new Error("No thumbnail image found in meta zip");
+  let thumbnailUrl: string | null = null;
+  if (thumbEntry) {
+    const [thumbName, thumbBytes] = thumbEntry;
+    const blob = new Blob([thumbBytes], { type: getMimeType(thumbName) });
+    thumbnailUrl = URL.createObjectURL(blob);
   }
-  const [thumbName, thumbBytes] = thumbEntry;
-  const blob = new Blob([thumbBytes], { type: getMimeType(thumbName) });
-  const thumbnailUrl = URL.createObjectURL(blob);
 
   return { details, thumbnailUrl };
 }
@@ -86,8 +86,8 @@ export async function validatePassphrase(
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const bytes = new Uint8Array(await res.arrayBuffer());
     const result = await decryptMetaZip(passphrase, bytes);
-    // Revoke the blob URL immediately — we don't need it for validation
-    URL.revokeObjectURL(result.thumbnailUrl);
+    // Revoke blob URL if present — not needed for validation
+    if (result.thumbnailUrl) URL.revokeObjectURL(result.thumbnailUrl);
     return true;
   } catch (err) {
     const msg = err instanceof Error ? err.message.toLowerCase() : "";

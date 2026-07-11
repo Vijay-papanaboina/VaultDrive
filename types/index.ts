@@ -31,7 +31,7 @@ export interface MetaDetails {
 export interface DecryptedMeta {
   driveFile: DriveMetaFile;
   details: MetaDetails;
-  thumbnailUrl: string;                // blob URL — must be revoked on unmount
+  thumbnailUrl: string | null;              // blob URL — null if no thumbnail in zip
   originalFileName: string;            // driveFile.name with .meta stripped
 }
 

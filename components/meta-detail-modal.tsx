@@ -10,7 +10,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import type { DecryptedMeta } from "@/types";
-import { Calendar, FileText, HardDrive, Tag, X } from "lucide-react";
+import { Calendar, FileText, HardDrive, Tag, X, FileArchive } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface MetaDetailModalProps {
@@ -46,79 +46,85 @@ export function MetaDetailModal({ meta, onClose }: MetaDetailModalProps) {
   const { details, thumbnailUrl, originalFileName, driveFile } = meta;
 
   return (
-    <Dialog open={!!meta} onOpenChange={(open, _event) => { if (!open) onClose(); }}>
+    <Dialog open={!!meta} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent
         id="meta-detail-modal"
-        className="max-h-[90vh] w-full max-w-2xl overflow-hidden p-0"
+        showCloseButton={false}
+        className="max-h-[95vh] w-full max-w-sm sm:max-w-lg md:max-w-4xl lg:max-w-5xl overflow-hidden p-0 border-white/10"
       >
-        {/* Large thumbnail */}
-        <div className="relative aspect-video w-full overflow-hidden bg-black/40">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={thumbnailUrl}
-            alt={`Preview of ${originalFileName}`}
-            className="h-full w-full object-contain"
-          />
-          {/* Close button overlay */}
-          <Button
-            id="meta-modal-close"
-            variant="ghost"
-            size="icon-sm"
-            onClick={onClose}
-            className="absolute right-3 top-3 rounded-full bg-black/50 text-white backdrop-blur-sm hover:bg-black/70"
-            aria-label="Close"
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-
-        {/* Details */}
-        <div className="flex flex-col gap-4 overflow-y-auto p-5">
-          <DialogHeader>
-            <DialogTitle className="font-mono text-base">
-              {originalFileName}
-            </DialogTitle>
-            {details.name !== originalFileName && (
-              <DialogDescription>{details.name}</DialogDescription>
-            )}
-          </DialogHeader>
-
-          {/* Description */}
-          {details.description && (
-            <p className="text-sm leading-relaxed text-muted-foreground">
-              {details.description}
-            </p>
-          )}
-
-          <Separator />
-
-          {/* Metadata row */}
-          <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
-            {details.date && (
-              <div className="flex flex-col gap-1">
-                <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                  <Calendar className="h-3 w-3" /> Date
-                </span>
-                <span className="text-foreground">{formatDate(details.date)}</span>
+        <div className="flex flex-col md:flex-row md:h-[75vh] max-h-[95vh] w-full">
+          {/* Left panel: Thumbnail (centered, dynamic object-contain) */}
+          <div className="relative flex flex-1 items-center justify-center bg-black/95 p-4 min-h-[300px] md:min-h-0">
+            {thumbnailUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={thumbnailUrl}
+                alt={`Preview of ${originalFileName}`}
+                className="max-h-[50vh] md:max-h-full max-w-full object-contain"
+              />
+            ) : (
+              <div className="flex aspect-video w-full items-center justify-center">
+                <FileArchive className="h-16 w-16 text-muted-foreground/20" />
               </div>
             )}
-            <div className="flex flex-col gap-1">
-              <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                <HardDrive className="h-3 w-3" /> Drive size
-              </span>
-              <span className="text-foreground">
-                {formatBytes(Number(driveFile.size))}
-              </span>
-            </div>
-            <div className="flex flex-col gap-1">
-              <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                <FileText className="h-3 w-3" /> Modified
-              </span>
-              <span className="text-foreground">
-                {formatDate(driveFile.modifiedTime)}
-              </span>
-            </div>
+            {/* Close button overlay */}
+            <Button
+              id="meta-modal-close"
+              variant="ghost"
+              size="icon-sm"
+              onClick={onClose}
+              className="absolute right-3 top-3 rounded-full bg-black/60 text-white backdrop-blur-sm hover:bg-black/80 z-10 border border-white/10"
+              aria-label="Close"
+            >
+              <X className="h-4 w-4" />
+            </Button>
           </div>
+
+          {/* Right panel: Details (scrollable, fixed width on desktop) */}
+          <div className="flex w-full md:w-[380px] shrink-0 flex-col gap-4 overflow-y-auto border-t border-white/8 md:border-t-0 md:border-l border-white/8 p-6 bg-background">
+            <DialogHeader>
+              <DialogTitle className="font-mono text-base break-all">
+                {originalFileName}
+              </DialogTitle>
+              {details.name !== originalFileName && (
+                <DialogDescription className="break-all">{details.name}</DialogDescription>
+              )}
+            </DialogHeader>
+
+            {/* Description */}
+            {details.description && (
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                {details.description}
+              </p>
+            )}
+
+            <Separator className="bg-white/8" />
+
+            {/* Metadata grid */}
+            <div className="flex flex-col gap-3 text-sm">
+              {details.date && (
+                <div className="flex justify-between items-center gap-4 py-1.5 border-b border-white/4">
+                  <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                    <Calendar className="h-3.5 w-3.5" /> Date
+                  </span>
+                  <span className="text-foreground text-right">{formatDate(details.date)}</span>
+                </div>
+              )}
+              <div className="flex justify-between items-center gap-4 py-1.5 border-b border-white/4">
+                <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                  <HardDrive className="h-3.5 w-3.5" /> Drive size
+                </span>
+                <span className="text-foreground font-mono">
+                  {formatBytes(Number(driveFile.size))}
+                </span>
+              </div>
+              <div className="flex justify-between items-center gap-4 py-1.5">
+                <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                  <FileText className="h-3.5 w-3.5" /> Modified
+                </span>
+                <span className="text-foreground text-right">{formatDate(driveFile.modifiedTime)}</span>
+              </div>
+            </div>
 
           {/* Extra fields */}
           {details.extra && Object.keys(details.extra).length > 0 && (
@@ -156,6 +162,7 @@ export function MetaDetailModal({ meta, onClose }: MetaDetailModalProps) {
               </div>
             </>
           )}
+          </div>
         </div>
       </DialogContent>
     </Dialog>
