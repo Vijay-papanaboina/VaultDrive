@@ -28,10 +28,15 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
     e.preventDefault();
     if (!value.trim()) return;
     setLoading(true);
-    // Small delay so the spinner renders before scrypt blocks
-    setTimeout(() => {
-      setPassphrase(value.trim());
-      setLoading(false);
+    // Small delay so the spinner renders before derivation blocks
+    setTimeout(async () => {
+      try {
+        await setPassphrase(value.trim());
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
     }, 50);
   }
 

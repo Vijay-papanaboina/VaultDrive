@@ -37,7 +37,7 @@ export function PasswordDialog({ testFileId, onSuccess }: PasswordDialogProps) {
     try {
       const valid = await validatePassphrase(value, testFileId);
       if (valid) {
-        setPassphrase(value);
+        await setPassphrase(value);
         onSuccess();
       } else {
         setStatus("error");

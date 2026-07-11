@@ -43,3 +43,6 @@ next-env.d.ts
 # database
 database.sqlite
 .cache_ggshield
+
+# local test assets
+ignore

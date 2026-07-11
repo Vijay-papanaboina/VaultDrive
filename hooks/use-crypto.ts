@@ -7,33 +7,35 @@ import React, {
   useState,
   ReactNode,
 } from "react";
+import { deriveAgeIdentity } from "@/lib/crypto";
 
 interface CryptoContextValue {
   hasPassphrase: boolean;
   getPassphrase: () => string | null;
-  setPassphrase: (pw: string) => void;
+  setPassphrase: (pw: string) => Promise<void>;
   clearPassphrase: () => void;
 }
 
 const CryptoContext = createContext<CryptoContextValue | null>(null);
 
 export function CryptoProvider({ children }: { children: ReactNode }) {
-  // useRef keeps the passphrase in memory only — never written to storage
-  const passphraseRef = useRef<string | null>(null);
+  // useRef keeps the derived private identity key in memory only — never written to storage
+  const identityRef = useRef<string | null>(null);
   // useState for reactivity (so UI re-renders when passphrase is set/cleared)
   const [hasPassphrase, setHasPassphrase] = useState(false);
 
   function getPassphrase() {
-    return passphraseRef.current;
+    return identityRef.current;
   }
 
-  function setPassphrase(pw: string) {
-    passphraseRef.current = pw;
+  async function setPassphrase(pw: string) {
+    const identity = await deriveAgeIdentity(pw);
+    identityRef.current = identity;
     setHasPassphrase(true);
   }
 
   function clearPassphrase() {
-    passphraseRef.current = null;
+    identityRef.current = null;
     setHasPassphrase(false);
   }
 

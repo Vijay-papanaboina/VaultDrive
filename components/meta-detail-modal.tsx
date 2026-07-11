@@ -112,10 +112,14 @@ export function MetaDetailModal({ meta, onClose }: MetaDetailModalProps) {
               )}
               <div className="flex justify-between items-center gap-4 py-1.5 border-b border-white/4">
                 <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                  <HardDrive className="h-3.5 w-3.5" /> Drive size
+                  <HardDrive className="h-3.5 w-3.5" /> Size
                 </span>
                 <span className="text-foreground font-mono">
-                  {formatBytes(Number(driveFile.size))}
+                  {formatBytes(
+                    details.extra?.size_bytes !== undefined
+                      ? Number(details.extra.size_bytes)
+                      : Number(driveFile.size)
+                  )}
                 </span>
               </div>
               <div className="flex justify-between items-center gap-4 py-1.5">
@@ -127,7 +131,7 @@ export function MetaDetailModal({ meta, onClose }: MetaDetailModalProps) {
             </div>
 
           {/* Extra fields */}
-          {details.extra && Object.keys(details.extra).length > 0 && (
+          {details.extra && Object.keys(details.extra).filter((k) => k !== "size_bytes").length > 0 && (
             <>
               <Separator />
               <div className="flex flex-col gap-2">
@@ -135,7 +139,9 @@ export function MetaDetailModal({ meta, onClose }: MetaDetailModalProps) {
                   <Tag className="h-3 w-3" /> Extra metadata
                 </span>
                 <div className="rounded-lg border border-white/8 bg-white/3">
-                  {Object.entries(details.extra).map(([k, v], i, arr) => (
+                  {Object.entries(details.extra)
+                    .filter(([k]) => k !== "size_bytes")
+                    .map(([k, v], i, arr) => (
                     <div
                       key={k}
                       className={`flex items-start justify-between gap-4 px-3 py-2 text-sm ${

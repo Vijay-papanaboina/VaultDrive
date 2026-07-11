@@ -91,10 +91,11 @@ export function MetaCard({ meta, onClick }: MetaCardProps) {
       <div className="flex flex-1 flex-col gap-2.5 p-3">
         {/* Filename */}
         <h3
-          className="line-clamp-1 font-mono text-xs font-medium text-foreground"
-          title={originalFileName}
+          className="truncate font-mono text-xs font-medium text-foreground"
+          title={details?.name ? `${originalFileName} ${details.name}` : originalFileName}
         >
           {originalFileName}
+          {details?.name && <span className="text-muted-foreground ml-1.5">{details.name}</span>}
         </h3>
 
         {/* Description or Shimmer / Error Message */}
@@ -123,10 +124,14 @@ export function MetaCard({ meta, onClick }: MetaCardProps) {
             <Calendar className="h-3 w-3" />
             {formatDate(details?.date ?? driveFile.modifiedTime)}
           </span>
-          {driveFile.size && (
+          {(driveFile.size || (decrypted && details?.extra?.size_bytes !== undefined)) && (
             <span className="flex items-center gap-1">
               <HardDrive className="h-3 w-3" />
-              {formatBytes(Number(driveFile.size))}
+              {formatBytes(
+                decrypted && details?.extra?.size_bytes !== undefined
+                  ? Number(details.extra.size_bytes)
+                  : Number(driveFile.size)
+              )}
             </span>
           )}
         </div>
@@ -137,11 +142,11 @@ export function MetaCard({ meta, onClick }: MetaCardProps) {
             <Skeleton className="h-4 w-12 rounded-full" />
             <Skeleton className="h-4 w-16 rounded-full" />
           </div>
-        ) : details?.extra && Object.keys(details.extra).length > 0 ? (
-          <div className="flex flex-wrap gap-1">
-            {Object.entries(details.extra)
-              .slice(0, 3)
-              .map(([k, v]) => (
+        ) : details?.extra && Object.keys(details.extra).filter((k) => k !== "size_bytes").length > 0 ? (() => {
+          const extraEntries = Object.entries(details.extra).filter(([k]) => k !== "size_bytes");
+          return (
+            <div className="flex flex-wrap gap-1">
+              {extraEntries.slice(0, 3).map(([k, v]) => (
                 <Badge
                   key={k}
                   variant="secondary"
@@ -151,13 +156,14 @@ export function MetaCard({ meta, onClick }: MetaCardProps) {
                   {String(v)}
                 </Badge>
               ))}
-            {Object.keys(details.extra).length > 3 && (
-              <Badge variant="secondary" className="h-4 rounded-full px-1.5 text-xs font-normal">
-                +{Object.keys(details.extra).length - 3}
-              </Badge>
-            )}
-          </div>
-        ) : null}
+              {extraEntries.length > 3 && (
+                <Badge variant="secondary" className="h-4 rounded-full px-1.5 text-xs font-normal">
+                  +{extraEntries.length - 3}
+                </Badge>
+              )}
+            </div>
+          );
+        })() : null}
       </div>
     </Card>
   );

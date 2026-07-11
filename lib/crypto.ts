@@ -2,6 +2,7 @@
 
 import { Decrypter } from "age-encryption";
 import { unzipSync } from "fflate";
+import { bech32 } from "@scure/base";
 import type { MetaDetails } from "@/types";
 
 const IMAGE_EXTS = /\.(webp|jpg|jpeg|png|gif|avif|bmp|svg)$/i;
@@ -27,21 +28,50 @@ export interface DecryptedZipResult {
 }
 
 /**
+ * Derive deterministic X25519 identity keypair matching the browser implementation.
+ */
+export async function deriveAgeIdentity(passphrase: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const passwordKey = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(passphrase),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+
+  const salt = encoder.encode("vaultdrive-deterministic-salt-x25519-generation");
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt: salt,
+      iterations: 10000,
+      hash: "SHA-256",
+    },
+    passwordKey,
+    256 // 32 bytes * 8
+  );
+
+  const privateKeyBytes = new Uint8Array(derivedBits);
+  return bech32.encodeFromBytes("AGE-SECRET-KEY-", privateKeyBytes).toUpperCase();
+}
+
+/**
  * Decrypt an age-encrypted zip .meta file.
  *
  * Flow:
- *  1. age decrypt (scrypt key derivation + ChaCha20-Poly1305)
+ *  1. age decrypt (X25519 identity decryption)
  *  2. fflate unzip — zip is used as a container, not for compression
  *  3. Extract details.json → parse as MetaDetails
  *  4. Find thumbnail.* → create blob URL
  */
 export async function decryptMetaZip(
-  passphrase: string,
+  identity: string,
   encryptedData: Uint8Array
 ): Promise<DecryptedZipResult> {
   // Step 1: age decrypt
   const d = new Decrypter();
-  d.addPassphrase(passphrase);
+  d.addIdentity(identity);
   const zipBytes = await d.decrypt(encryptedData);
 
   // Step 2: unzip
@@ -85,7 +115,8 @@ export async function validatePassphrase(
     const res = await fetch(`/api/drive/meta/${testFileId}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const bytes = new Uint8Array(await res.arrayBuffer());
-    const result = await decryptMetaZip(passphrase, bytes);
+    const identity = await deriveAgeIdentity(passphrase);
+    const result = await decryptMetaZip(identity, bytes);
     // Revoke blob URL if present — not needed for validation
     if (result.thumbnailUrl) URL.revokeObjectURL(result.thumbnailUrl);
     return true;
