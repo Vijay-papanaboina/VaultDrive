@@ -88,16 +88,17 @@ function printUsage() {
   console.log(`
 VaultDrive CLI Packaging Tool (.mjs)
 -----------------------------
-Scans a folder for .webp thumbnails, pairs them with original files,
-creates metadata zips, encrypts them to numbered ID files, and saves mapping.
+Scans a folder recursively for .webp thumbnails, pairs them with original files,
+creates metadata zips, and encrypts them to numbered ID files.
 
 Usage:
   node tools/vaultdrive-cli.mjs [options]
 
 Options:
   --input, -i       Directory with original files and .webp images
-  --output, -o      Directory where encrypted <ID>.meta files will be written
-  --start-id, -s    Starting ID number for file naming (increments for each file)
+  --output, -o      (Optional) Directory where mirrored encrypted structure is written.
+                    If omitted, encrypts in-place inside 'encrypted/' folders.
+  --start-id, -s    Starting ID number for file naming (increments globally for each file)
   --keys, -k        Derive and display Public/Private keys from a passphrase, then exit
   --help, -h        Display this help message
 `);
@@ -151,8 +152,8 @@ async function main() {
   }
 
   // 3. Normal packaging run — check required flags
-  if (!inputDir || !outputDir || !startIdStr) {
-    console.error("Error: Missing required arguments for encryption packaging.");
+  if (!inputDir || !startIdStr) {
+    console.error("Error: Missing required arguments for encryption packaging. --input (-i) and --start-id (-s) are required.");
     printUsage();
     process.exit(1);
   }
@@ -168,13 +169,12 @@ async function main() {
     process.exit(1);
   }
 
-  // Resolve outputDir relative to inputDir if it's not an absolute path
-  const resolvedOutputDir = path.isAbsolute(outputDir)
-    ? outputDir
-    : path.resolve(inputDir, outputDir);
-
-  if (!fs.existsSync(resolvedOutputDir)) {
-    fs.mkdirSync(resolvedOutputDir, { recursive: true });
+  // Resolve outputDir relative to inputDir if it's not an absolute path and is provided
+  let resolvedOutputDir = "";
+  if (outputDir) {
+    resolvedOutputDir = path.isAbsolute(outputDir)
+      ? outputDir
+      : path.resolve(inputDir, outputDir);
   }
 
   // Ask for passphrase securely
@@ -192,130 +192,155 @@ async function main() {
   // Derive keys silently for the packaging run
   const { recipient } = await deriveAgeKeys(passphrase.trim());
 
-  // Scan input directory for files
-  const files = fs.readdirSync(inputDir);
+  console.log(`Scanning directory recursively: ${inputDir}`);
+  const state = { currentId };
+  await processDir(inputDir, inputDir, resolvedOutputDir, recipient, state);
+
+  console.log(`\nSuccess! Processing finished. Ending ID: ${state.currentId}`);
+}
+
+async function processDir(currentDir, inputDir, resolvedOutputDir, recipient, state) {
+  // Read all items in the current directory
+  const items = fs.readdirSync(currentDir);
+
+  // Separate files and directories
+  const files = [];
+  const dirs = [];
+
+  for (const item of items) {
+    const fullPath = path.join(currentDir, item);
+    const stat = fs.statSync(fullPath);
+    if (stat.isDirectory()) {
+      // Ignore directory named 'encrypted'
+      if (item === "encrypted") continue;
+      // Also ignore standard ignorable directories
+      if (item === ".git" || item === "node_modules" || item === ".next") continue;
+      dirs.push(fullPath);
+    } else if (stat.isFile()) {
+      files.push(item);
+    }
+  }
+
+  // Filter for webp files in the current folder
   const webpFiles = files.filter((f) => f.toLowerCase().endsWith(".webp"));
 
-  if (webpFiles.length === 0) {
-    console.log("No .webp thumbnail files found in the input folder.");
-    process.exit(0);
-  }
+  let targetOutputDir = "";
+  let hasEncryptedFiles = false;
 
-  console.log(`Found ${webpFiles.length} thumbnail(s). Processing...`);
-  const mapping = {};
-
-  for (const webpFile of webpFiles) {
-    const baseName = path.parse(webpFile).name;
-
-    const webpPath = path.join(inputDir, webpFile);
-    // Ensure the webp target is a file, not a directory
-    if (!fs.statSync(webpPath).isFile()) continue;
-
-    // Find the original file matching this base name (must be a file, not a folder)
-    const origFile = files.find((f) => {
-      const parts = path.parse(f);
-      if (parts.name !== baseName || f === webpFile) return false;
-      const fullPath = path.join(inputDir, f);
-      try {
-        return fs.statSync(fullPath).isFile();
-      } catch {
-        return false;
-      }
-    });
-
-    if (!origFile) {
-      console.warn(`Warning: Could not find matching original file for thumbnail: ${webpFile}`);
-      continue;
+  if (webpFiles.length > 0) {
+    // Determine output directory for this level
+    if (resolvedOutputDir) {
+      const relPath = path.relative(inputDir, currentDir);
+      targetOutputDir = path.join(resolvedOutputDir, relPath);
+    } else {
+      targetOutputDir = path.join(currentDir, "encrypted");
     }
 
-    const origPath = path.join(inputDir, origFile);
-    const origStat = fs.statSync(origPath);
-    const origSize = origStat.size;
+    for (const webpFile of webpFiles) {
+      const baseName = path.parse(webpFile).name;
+      const webpPath = path.join(currentDir, webpFile);
 
-    console.log(`Processing pair: ${origFile} <-> ${webpFile} (${(origSize / 1024).toFixed(1)} KB)`);
+      // Find the original file matching this base name in current folder
+      const origFile = files.find((f) => {
+        const parts = path.parse(f);
+        if (parts.name !== baseName || f === webpFile) return false;
+        const fullPath = path.join(currentDir, f);
+        try {
+          return fs.statSync(fullPath).isFile();
+        } catch {
+          return false;
+        }
+      });
 
-    // 1. Create details JSON
-    const details = {
-      name: origFile,
-      date: new Date().toISOString(),
-      extra: {
-        size_bytes: origSize,
-      },
-    };
+      if (!origFile) {
+        continue;
+      }
 
-    // 2. Read thumbnail webp bytes
-    const webpBytes = new Uint8Array(fs.readFileSync(webpPath));
+      if (!hasEncryptedFiles) {
+        // Create directory on first write at this level
+        if (!fs.existsSync(targetOutputDir)) {
+          fs.mkdirSync(targetOutputDir, { recursive: true });
+        }
+        hasEncryptedFiles = true;
+      }
 
-    // 3. Zip files in-memory (no compression used as storage container)
-    const zipData = fflate.zipSync(
-      {
-        "details.json": fflate.strToU8(JSON.stringify(details)),
-        "thumbnail.webp": webpBytes,
-      },
-      { level: 0 }
-    );
+      const origPath = path.join(currentDir, origFile);
+      const origStat = fs.statSync(origPath);
+      const origSize = origStat.size;
 
-    // 4. Encrypt zip bytes using Derived Recipient Key
-    const enc = new Encrypter();
-    enc.addRecipient(recipient);
-    const encryptedBytes = await enc.encrypt(zipData);
+      const currentId = state.currentId;
+      console.log(`[ID ${currentId}] Processing pair in ${path.relative(inputDir, currentDir) || "."}: ${origFile} <-> ${webpFile} (${(origSize / 1024).toFixed(1)} KB)`);
 
-    // 5. Output file as <ID>.meta
-    const metaFileName = `${currentId}.meta`;
-    const metaPath = path.join(resolvedOutputDir, metaFileName);
-    fs.writeFileSync(metaPath, encryptedBytes);
+      // 1. Create details JSON
+      const details = {
+        name: origFile,
+        date: new Date().toISOString(),
+        extra: {
+          size_bytes: origSize,
+        },
+      };
 
-    // 5b. Encrypt filename and payload, output combined package as <ID>
-    // Encrypt filename
-    const filenameBytes = Buffer.from(origFile, "utf8");
-    const nameEnc = new Encrypter();
-    nameEnc.addRecipient(recipient);
-    const encryptedNameBytes = await nameEnc.encrypt(filenameBytes);
+      // 2. Read thumbnail webp bytes
+      const webpBytes = new Uint8Array(fs.readFileSync(webpPath));
 
-    const payloadFileName = `${currentId}`;
-    const payloadPath = path.join(resolvedOutputDir, payloadFileName);
-    
-    // Open write stream for combined payload
-    const writeStream = fs.createWriteStream(payloadPath);
-    
-    // Write [4-byte big-endian name length]
-    const lenBuffer = Buffer.alloc(4);
-    lenBuffer.writeUInt32BE(encryptedNameBytes.length, 0);
-    writeStream.write(lenBuffer);
-    
-    // Write [encrypted name]
-    writeStream.write(Buffer.from(encryptedNameBytes));
+      // 3. Zip files in-memory (no compression used as storage container)
+      const zipData = fflate.zipSync(
+        {
+          "details.json": fflate.strToU8(JSON.stringify(details)),
+          "thumbnail.webp": webpBytes,
+        },
+        { level: 0 }
+      );
 
-    // Stream encrypt [payload]
-    const payloadEnc = new Encrypter();
-    payloadEnc.addRecipient(recipient);
-    
-    const nodeReadStream = fs.createReadStream(origPath);
-    const webReadStream = Readable.toWeb(nodeReadStream);
-    const encryptedWebStream = await payloadEnc.encrypt(webReadStream);
-    const nodeEncryptedReadStream = Readable.fromWeb(encryptedWebStream);
+      // 4. Encrypt zip bytes using Derived Recipient Key
+      const enc = new Encrypter();
+      enc.addRecipient(recipient);
+      const encryptedBytes = await enc.encrypt(zipData);
 
-    await new Promise((resolve, reject) => {
-      nodeEncryptedReadStream.pipe(writeStream);
-      writeStream.on("finish", resolve);
-      nodeEncryptedReadStream.on("error", reject);
-      writeStream.on("error", reject);
-    });
+      // 5. Output file as <ID>.meta
+      const metaFileName = `${currentId}.meta`;
+      const metaPath = path.join(targetOutputDir, metaFileName);
+      fs.writeFileSync(metaPath, encryptedBytes);
 
-    // 6. Record mapping
-    mapping[currentId] = origFile;
+      // 5b. Encrypt filename and payload, output combined package as <ID>
+      const filenameBytes = Buffer.from(origFile, "utf8");
+      const nameEnc = new Encrypter();
+      nameEnc.addRecipient(recipient);
+      const encryptedNameBytes = await nameEnc.encrypt(filenameBytes);
 
-    console.log(`  -> Encrypted to ${metaFileName} and payload ${payloadFileName} with ID ${currentId}`);
-    
-    // Increment ID for the next file
-    currentId++;
+      const payloadFileName = `${currentId}`;
+      const payloadPath = path.join(targetOutputDir, payloadFileName);
+
+      const writeStream = fs.createWriteStream(payloadPath);
+
+      const lenBuffer = Buffer.alloc(4);
+      lenBuffer.writeUInt32BE(encryptedNameBytes.length, 0);
+      writeStream.write(lenBuffer);
+      writeStream.write(Buffer.from(encryptedNameBytes));
+
+      const payloadEnc = new Encrypter();
+      payloadEnc.addRecipient(recipient);
+
+      const nodeReadStream = fs.createReadStream(origPath);
+      const webReadStream = Readable.toWeb(nodeReadStream);
+      const encryptedWebStream = await payloadEnc.encrypt(webReadStream);
+      const nodeEncryptedReadStream = Readable.fromWeb(encryptedWebStream);
+
+      await new Promise((resolve, reject) => {
+        nodeEncryptedReadStream.pipe(writeStream);
+        writeStream.on("finish", resolve);
+        nodeEncryptedReadStream.on("error", reject);
+        writeStream.on("error", reject);
+      });
+
+      state.currentId++;
+    }
   }
 
-  // Save the ID-to-filename mapping index
-  const mappingPath = path.join(resolvedOutputDir, "mapping.json");
-  fs.writeFileSync(mappingPath, JSON.stringify(mapping, null, 2));
-  console.log(`\nMapping table written to: ${mappingPath}`);
-  console.log("Success! Processing finished.");
+  // Recursively process directories
+  for (const dir of dirs) {
+    await processDir(dir, inputDir, resolvedOutputDir, recipient, state);
+  }
 }
 
 main().catch((err) => {

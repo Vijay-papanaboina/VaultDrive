@@ -77,31 +77,65 @@ function printUsage() {
   console.log(`
 VaultDrive Decryption Tool
 -----------------------------
-Decrypts one or more combined payload files containing an encrypted filename and file body.
+Decrypts one or more encrypted files recursively.
 
 Usage:
   node tools/decrypt-file.mjs [options]
 
 Options:
-  --file, -f        Path to a single encrypted payload file
-  --dir, -d         Path to a directory containing multiple encrypted payload files
-  --output, -o      Output directory (default: current directory)
+  --file, -f        Path to a single encrypted file (payload or meta)
+  --dir, -d         Path to a directory containing encrypted files to scan recursively
+  --output, -o      (Optional) Directory where mirrored decrypted structure is written.
+                    If omitted, decrypts in-place inside 'decrypted/' folders.
   --help, -h        Display this help message
 `);
 }
 
-async function decryptSingleFile(filePath, outputDir, identity) {
-  // Read first 4 bytes to get the name length
-  const fd = fs.openSync(filePath, "r");
-  const lenBuffer = Buffer.alloc(4);
-  const readLen = fs.readSync(fd, lenBuffer, 0, 4, 0);
-  if (readLen < 4) {
-    fs.closeSync(fd);
-    throw new Error("File is too small to contain a valid header.");
-  }
-  const nameLen = lenBuffer.readUInt32BE(0);
+/**
+ * Detects if a file is age-encrypted and if it is plain (like a .meta file)
+ * or packaged (with a prepended 4-byte filename length and filename).
+ */
+function detectFileType(filePath) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const buffer = Buffer.alloc(4);
+    const bytesRead = fs.readSync(fd, buffer, 0, 4, 0);
+    if (bytesRead < 4) {
+      return { isAge: false };
+    }
 
-  // Read the encrypted name
+    // Check direct magic first (at offset 0)
+    const directMagicBuffer = Buffer.alloc(21);
+    const directRead = fs.readSync(fd, directMagicBuffer, 0, 21, 0);
+    if (directRead === 21 && directMagicBuffer.toString("utf8") === "age-encryption.org/v1") {
+      return { isAge: true, type: "plain" };
+    }
+
+    // Now check if it's a packaged payload file
+    const nameLen = buffer.readUInt32BE(0);
+    // Sanity check: is nameLen reasonable? (e.g. < 4096 bytes)
+    if (nameLen > 0 && nameLen < 4096) {
+      const packageMagicBuffer = Buffer.alloc(21);
+      const packageRead = fs.readSync(fd, packageMagicBuffer, 0, 21, 4 + nameLen);
+      if (packageRead === 21 && packageMagicBuffer.toString("utf8") === "age-encryption.org/v1") {
+        return { isAge: true, type: "packaged", nameLen };
+      }
+    }
+  } catch (e) {
+    // Ignore errors
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch (e) {}
+    }
+  }
+  return { isAge: false };
+}
+
+async function decryptPackagedFile(filePath, nameLen, outputDir, identity) {
+  const fd = fs.openSync(filePath, "r");
   const encNameBuffer = Buffer.alloc(nameLen);
   const readNameLen = fs.readSync(fd, encNameBuffer, 0, nameLen, 4);
   fs.closeSync(fd);
@@ -145,11 +179,106 @@ async function decryptSingleFile(filePath, outputDir, identity) {
   return resolvedOutputPath;
 }
 
+async function decryptPlainFile(filePath, outputDir, identity) {
+  const fileName = path.basename(filePath);
+  let decryptedName = fileName + ".decrypted";
+  if (fileName.toLowerCase().endsWith(".meta")) {
+    decryptedName = fileName.slice(0, -5) + "-meta.zip";
+  }
+
+  const resolvedOutputPath = path.join(outputDir, decryptedName);
+  const writeStream = fs.createWriteStream(resolvedOutputPath);
+
+  const dec = new Decrypter();
+  dec.addIdentity(identity);
+
+  const nodeReadStream = fs.createReadStream(filePath);
+  const webReadStream = Readable.toWeb(nodeReadStream);
+  const decryptedWebStream = await dec.decrypt(webReadStream);
+  const nodeDecryptedReadStream = Readable.fromWeb(decryptedWebStream);
+
+  await new Promise((resolve, reject) => {
+    nodeDecryptedReadStream.pipe(writeStream);
+    writeStream.on("finish", resolve);
+    nodeDecryptedReadStream.on("error", reject);
+    writeStream.on("error", reject);
+  });
+
+  return resolvedOutputPath;
+}
+
+async function processDir(currentDir, baseInputDir, resolvedOutputDir, identity, state) {
+  const items = fs.readdirSync(currentDir, { withFileTypes: true });
+  const files = [];
+  const dirs = [];
+
+  for (const item of items) {
+    const fullPath = path.join(currentDir, item.name);
+    if (item.isDirectory()) {
+      if (item.name === "node_modules" || item.name === ".git") {
+        continue;
+      }
+      dirs.push(fullPath);
+    } else if (item.isFile()) {
+      files.push(fullPath);
+    }
+  }
+
+  // Filter files that are age files
+  const ageFiles = [];
+  for (const filePath of files) {
+    const info = detectFileType(filePath);
+    if (info.isAge) {
+      ageFiles.push({ filePath, info });
+    }
+  }
+
+  if (ageFiles.length > 0) {
+    let targetOutputDir = "";
+    if (resolvedOutputDir) {
+      const relPath = path.relative(baseInputDir, currentDir);
+      targetOutputDir = path.join(resolvedOutputDir, relPath);
+    } else {
+      targetOutputDir = path.join(currentDir, "decrypted");
+    }
+
+    if (!fs.existsSync(targetOutputDir)) {
+      fs.mkdirSync(targetOutputDir, { recursive: true });
+    }
+
+    for (const { filePath, info } of ageFiles) {
+      state.totalFiles++;
+      const fileName = path.basename(filePath);
+      console.log(`Processing file: ${fileName}...`);
+      try {
+        let resolvedOutputPath = "";
+        if (info.type === "packaged") {
+          resolvedOutputPath = await decryptPackagedFile(filePath, info.nameLen, targetOutputDir, identity);
+        } else {
+          resolvedOutputPath = await decryptPlainFile(filePath, targetOutputDir, identity);
+        }
+        console.log(`  \x1b[32m✓ Decrypted:\x1b[0m ${fileName} -> ${resolvedOutputPath}`);
+        state.successCount++;
+      } catch (err) {
+        console.error(`  \x1b[31m✗ Failed:\x1b[0m ${fileName} - ${err.message}`);
+      }
+    }
+  }
+
+  // Process subdirectories recursively
+  for (const dir of dirs) {
+    if (path.basename(dir) === "decrypted") {
+      continue;
+    }
+    await processDir(dir, baseInputDir, resolvedOutputDir, identity, state);
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   let filePath = "";
   let dirPath = "";
-  let outputDir = ".";
+  let outputDir = "";
   let showHelp = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -180,66 +309,71 @@ async function main() {
     process.exit(1);
   }
 
-  // Find files to process
-  const filesToDecrypt = [];
   if (filePath) {
     if (!fs.existsSync(filePath)) {
       console.error(`Error: Encrypted file does not exist at ${filePath}`);
       process.exit(1);
     }
-    filesToDecrypt.push({
-      path: filePath,
-      name: path.basename(filePath)
-    });
-  } else {
+    const info = detectFileType(filePath);
+    if (!info.isAge) {
+      console.error(`Error: File at ${filePath} is not a valid age-encrypted file.`);
+      process.exit(1);
+    }
+
+    const passphrase = await askPassphrase("Enter decryption passphrase: ");
+    if (!passphrase || !passphrase.trim()) {
+      console.error("\nError: Passphrase cannot be empty.");
+      process.exit(1);
+    }
+    const identity = deriveAgeIdentity(passphrase.trim());
+
+    const destDir = outputDir || ".";
+    if (!fs.existsSync(destDir)) {
+      fs.mkdirSync(destDir, { recursive: true });
+    }
+
+    console.log(`Processing file: ${path.basename(filePath)}...`);
+    try {
+      let resolvedOutputPath = "";
+      if (info.type === "packaged") {
+        resolvedOutputPath = await decryptPackagedFile(filePath, info.nameLen, destDir, identity);
+      } else {
+        resolvedOutputPath = await decryptPlainFile(filePath, destDir, identity);
+      }
+      console.log(`  \x1b[32m✓ Decrypted:\x1b[0m ${path.basename(filePath)} -> ${resolvedOutputPath}`);
+    } catch (err) {
+      console.error(`  \x1b[31m✗ Failed:\x1b[0m ${path.basename(filePath)} - ${err.message}`);
+      process.exit(1);
+    }
+  }
+
+  if (dirPath) {
     if (!fs.existsSync(dirPath)) {
       console.error(`Error: Directory does not exist at ${dirPath}`);
       process.exit(1);
     }
-    const dirFiles = fs.readdirSync(dirPath)
-      .filter((file) => /^\d+$/.test(file)) // only match numeric IDs (e.g. 100, 101, skip .meta)
-      .map((file) => ({
-        path: path.join(dirPath, file),
-        name: file
-      }))
-      .sort((a, b) => Number(a.name) - Number(b.name));
 
-    if (dirFiles.length === 0) {
-      console.error(`Error: No numeric encrypted payload files found in directory ${dirPath}`);
+    const passphrase = await askPassphrase("Enter decryption passphrase: ");
+    if (!passphrase || !passphrase.trim()) {
+      console.error("\nError: Passphrase cannot be empty.");
       process.exit(1);
     }
-    filesToDecrypt.push(...dirFiles);
-  }
+    const identity = deriveAgeIdentity(passphrase.trim());
 
-  // Ask for passphrase once
-  const passphrase = await askPassphrase("Enter decryption passphrase: ");
-  if (!passphrase || !passphrase.trim()) {
-    console.error("\nError: Passphrase cannot be empty.");
-    process.exit(1);
-  }
+    const resolvedOutputDir = outputDir ? path.resolve(outputDir) : "";
+    const baseInputDir = path.resolve(dirPath);
 
-  const identity = deriveAgeIdentity(passphrase.trim());
+    console.log(`Scanning directory recursively: ${dirPath}`);
+    const state = { totalFiles: 0, successCount: 0 };
+    await processDir(baseInputDir, baseInputDir, resolvedOutputDir, identity, state);
 
-  // Ensure output directory exists
-  if (!fs.existsSync(outputDir)) {
-    fs.mkdirSync(outputDir, { recursive: true });
-  }
-
-  console.log(`\n🔑 Derived identity key. Processing ${filesToDecrypt.length} file(s)...`);
-
-  let successCount = 0;
-  for (const item of filesToDecrypt) {
-    console.log(`Processing file: ${item.name}...`);
-    try {
-      const resolvedOutputPath = await decryptSingleFile(item.path, outputDir, identity);
-      console.log(`  \x1b[32m✓ Decrypted:\x1b[0m ${item.name} -> ${resolvedOutputPath}`);
-      successCount++;
-    } catch (err) {
-      console.error(`  \x1b[31m✗ Failed:\x1b[0m ${item.name} - ${err.message}`);
+    if (state.totalFiles === 0) {
+      console.error(`\nError: No age-encrypted files found in directory ${dirPath}`);
+      process.exit(1);
     }
-  }
 
-  console.log(`\n🎉 Decryption finished. Successfully decrypted: ${successCount}/${filesToDecrypt.length} file(s).`);
+    console.log(`\n🎉 Decryption finished. Successfully decrypted: ${state.successCount}/${state.totalFiles} file(s).`);
+  }
 }
 
 main().catch((err) => {

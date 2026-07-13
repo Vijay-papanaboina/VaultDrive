@@ -51,11 +51,10 @@ export function SelectionProvider({ children }: { children: ReactNode }) {
     const lines: string[] = [];
     selectedFiles.forEach((file) => {
       const prefix = file.relativePath ? `${file.relativePath}/` : "";
-      lines.push(`${prefix}${file.id}.meta`);
       lines.push(`${prefix}${file.id}`);
     });
     
-    const textContent = lines.join("\n");
+    const textContent = lines.join("\n") + "\n";
 
     // Download file
     const blob = new Blob([textContent], { type: "text/plain" });

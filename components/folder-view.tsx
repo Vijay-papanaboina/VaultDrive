@@ -60,7 +60,10 @@ export function FolderView({ folderId }: FolderViewProps) {
 
   const { files, isListLoading, isDecrypting, error: metaError, refetch } = useMetaFiles(folderId);
 
-  const relativePath = breadcrumbs.map((b) => b.name).join("/");
+  const relativePath = breadcrumbs
+    .map((b) => b.name)
+    .filter((name) => name.toLowerCase() !== "my drive")
+    .join("/");
 
   const isLoading = isFoldersLoading || isPathLoading || isListLoading;
 

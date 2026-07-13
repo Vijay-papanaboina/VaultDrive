@@ -23,22 +23,33 @@ export function DriveHeader() {
 
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [rcloneRemote, setRcloneRemote] = useState("mygdrive:");
-  const [copied, setCopied] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const handleExport = () => {
     exportFilesList();
     setIsExportModalOpen(true);
   };
 
-  const rcloneCommand = `rclone copy "${rcloneRemote}" ./decrypted-files --files-from files.txt`;
+  const commands = [
+    {
+      id: "rclone",
+      label: "Copyable Rclone Command",
+      value: `rclone copy "${rcloneRemote}" ./decrypted-files --files-from files.txt`,
+    },
+    {
+      id: "flatten",
+      label: "Flatten Command (Run inside destination dir)",
+      value: `find . -mindepth 1 -type f -exec mv -t . {} +`,
+    },
+  ];
 
-  const handleCopyCommand = async () => {
+  const handleCopy = async (id: string, text: string) => {
     try {
-      await navigator.clipboard.writeText(rcloneCommand);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
     } catch (err) {
-      console.error("Failed to copy command:", err);
+      console.error(`Failed to copy command ${id}:`, err);
     }
   };
 
@@ -138,28 +149,30 @@ export function DriveHeader() {
               </span>
             </div>
 
-            {/* Copyable code block */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">
-                Copyable Rclone Command
-              </label>
-              <div className="relative flex items-center justify-between rounded-lg bg-[#070709] border border-white/5 p-3 text-xs font-mono text-violet-300">
-                <span className="break-all pr-8 leading-relaxed">
-                  {rcloneCommand}
-                </span>
-                <button
-                  onClick={handleCopyCommand}
-                  className="absolute right-2 top-2 p-1.5 rounded-md hover:bg-white/5 text-muted-foreground hover:text-foreground transition-all"
-                  title="Copy command to clipboard"
-                >
-                  {copied ? (
-                    <Check className="h-4 w-4 text-emerald-400" />
-                  ) : (
-                    <Clipboard className="h-4 w-4" />
-                  )}
-                </button>
+            {/* Copyable commands */}
+            {commands.map((cmd) => (
+              <div key={cmd.id} className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">
+                  {cmd.label}
+                </label>
+                <div className="relative flex items-center justify-between rounded-lg bg-[#070709] border border-white/5 p-3 text-xs font-mono text-violet-300">
+                  <span className="break-all pr-8 leading-relaxed">
+                    {cmd.value}
+                  </span>
+                  <button
+                    onClick={() => handleCopy(cmd.id, cmd.value)}
+                    className="absolute right-2 top-2 p-1.5 rounded-md hover:bg-white/5 text-muted-foreground hover:text-foreground transition-all"
+                    title={`Copy ${cmd.label} to clipboard`}
+                  >
+                    {copiedId === cmd.id ? (
+                      <Check className="h-4 w-4 text-emerald-400" />
+                    ) : (
+                      <Clipboard className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
               </div>
-            </div>
+            ))}
 
             {/* Instructions */}
             <div className="rounded-lg bg-white/5 border border-white/5 p-3 text-[11px] leading-relaxed text-muted-foreground space-y-1">
@@ -167,6 +180,7 @@ export function DriveHeader() {
               <p>1. Move the downloaded <code className="text-violet-400 font-mono">files.txt</code> into the directory where you plan to run the command.</p>
               <p>2. Run the copied command in your terminal.</p>
               <p>3. Use <code className="text-violet-400 font-mono">decrypt-file.mjs</code> to restore the original filenames after downloading.</p>
+              <p>4. (Optional) Run the flatten command inside the destination folder to move all nested files to the root level.</p>
             </div>
           </div>
         </DialogContent>
