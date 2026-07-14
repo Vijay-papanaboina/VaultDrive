@@ -19,6 +19,8 @@ interface CryptoContextValue {
   clearPassphraseError: () => void;
   dismissedPassphraseError: boolean;
   setDismissedPassphraseError: (val: boolean) => void;
+  isGateOpen: boolean;
+  setIsGateOpen: (val: boolean) => void;
 }
 
 const CryptoContext = createContext<CryptoContextValue | null>(null);
@@ -30,6 +32,7 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
   const [hasPassphrase, setHasPassphrase] = useState(false);
   const [passphraseError, setPassphraseError] = useState<string | null>(null);
   const [dismissedPassphraseError, setDismissedPassphraseError] = useState(false);
+  const [isGateOpen, setIsGateOpen] = useState(false);
 
   const queryClient = useQueryClient();
 
@@ -43,11 +46,14 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
     setHasPassphrase(true);
     setPassphraseError(null);
     setDismissedPassphraseError(false);
+    setIsGateOpen(false);
+    queryClient.clear();
   }
 
   function clearPassphrase(errorMsg?: string) {
     identityRef.current = null;
     setHasPassphrase(false);
+    setIsGateOpen(false);
     queryClient.clear();
     if (typeof errorMsg === "string") {
       setPassphraseError(errorMsg);
@@ -72,6 +78,8 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
         clearPassphraseError,
         dismissedPassphraseError,
         setDismissedPassphraseError,
+        isGateOpen,
+        setIsGateOpen,
       },
     },
     children

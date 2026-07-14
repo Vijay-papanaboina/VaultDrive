@@ -1,9 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { Shield, Lock, CheckSquare, Download, Clipboard, Check, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { Shield, Lock, CheckSquare, Download, Clipboard, Check, Trash2, Search, KeyRound } from "lucide-react";
 import { UserMenu } from "@/components/user-menu";
 import { useSelection } from "@/components/selection-provider";
+import { useCrypto } from "@/hooks/use-crypto";
+import { GlobalSearchModal } from "@/components/global-search-modal";
 import {
   Dialog,
   DialogContent,
@@ -20,8 +23,10 @@ export function DriveHeader() {
     clearSelection,
     exportFilesList,
   } = useSelection();
+  const { hasPassphrase, setIsGateOpen } = useCrypto();
 
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [rcloneRemote, setRcloneRemote] = useState("mygdrive:");
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -58,21 +63,39 @@ export function DriveHeader() {
       <header className="sticky top-0 z-40 border-b border-white/8 bg-background/80 backdrop-blur-xl">
         <div className="mx-auto flex h-14 max-w-7xl items-center gap-4 px-4 sm:px-6">
           {/* Logo / brand */}
-          <div className="flex items-center gap-2 font-semibold text-foreground">
+          <Link href="/drive" className="cursor-pointer flex items-center gap-2 font-semibold text-foreground">
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-600/20 border border-violet-500/30">
               <Lock className="h-3.5 w-3.5 text-violet-400" />
             </div>
             <span>VaultDrive</span>
-          </div>
+          </Link>
 
           <div className="flex flex-1 items-center justify-end gap-3">
             {/* Global Selection Mode controls */}
             <div className="flex items-center gap-2">
+              {hasPassphrase && (
+                <button
+                  onClick={() => setIsGateOpen(true)}
+                  className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-white/10 hover:text-foreground transition-all cursor-pointer"
+                >
+                  <KeyRound className="h-3.5 w-3.5" />
+                  <span>Re-enter Key</span>
+                </button>
+              )}
+
+              <button
+                onClick={() => setIsSearchOpen(true)}
+                className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-white/10 hover:text-foreground transition-all cursor-pointer"
+              >
+                <Search className="h-3.5 w-3.5" />
+                <span>Search</span>
+              </button>
+
               {selectedFiles.length > 0 && (
                 <>
                   <button
                     onClick={handleExport}
-                    className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg shadow-emerald-600/20 transition-all hover:bg-emerald-500"
+                    className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg shadow-emerald-600/20 transition-all hover:bg-emerald-500 cursor-pointer"
                   >
                     <Download className="h-3.5 w-3.5" />
                     <span>Download List</span>
@@ -80,7 +103,7 @@ export function DriveHeader() {
 
                   <button
                     onClick={clearSelection}
-                    className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-red-500/10 hover:text-red-400 transition-all"
+                    className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-red-500/10 hover:text-red-400 transition-all cursor-pointer"
                     title="Clear all selections"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
@@ -91,7 +114,7 @@ export function DriveHeader() {
 
               <button
                 onClick={toggleSelectionMode}
-                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all cursor-pointer ${
                   isSelectionMode
                     ? "bg-violet-600 text-white shadow-lg shadow-violet-600/20"
                     : "border border-white/10 bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground"
@@ -185,6 +208,7 @@ export function DriveHeader() {
           </div>
         </DialogContent>
       </Dialog>
+      <GlobalSearchModal isOpen={isSearchOpen} onClose={() => setIsSearchOpen(false)} />
     </>
   );
 }

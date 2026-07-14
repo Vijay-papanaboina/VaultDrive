@@ -147,7 +147,7 @@ export function UserMenu() {
       <DropdownMenu>
         <DropdownMenuTrigger
           id="user-menu-trigger"
-          className="flex items-center gap-2 rounded-full p-0.5 transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="flex items-center gap-2 rounded-full p-0.5 transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer"
           aria-label="User menu"
         >
           <Avatar className="h-8 w-8 border border-white/10">
@@ -184,7 +184,7 @@ export function UserMenu() {
           <DropdownMenuSeparator />
           <DropdownMenuItem
             id="sign-out-btn"
-            className="gap-2 text-destructive focus:text-destructive"
+            className="gap-2 text-destructive focus:text-destructive cursor-pointer"
             onClick={() => signOut({ fetchOptions: { onSuccess: () => { window.location.href = "/"; } } })}
           >
             <LogOut className="h-3.5 w-3.5" />
