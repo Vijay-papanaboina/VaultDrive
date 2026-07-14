@@ -78,7 +78,7 @@ export async function listMetaFiles(
   folderId: string
 ): Promise<DriveMetaFile[]> {
   const q = `'${folderId}' in parents and fileExtension = 'meta' and trashed = false`;
-  const files = await listAll(accessToken, q, "id,name,size,modifiedTime");
+  const files = await listAll(accessToken, q, "id,name,size,modifiedTime,createdTime");
   return files as DriveMetaFile[];
 }
 

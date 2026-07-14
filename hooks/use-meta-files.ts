@@ -67,7 +67,16 @@ export function useMetaFiles(
 
     let cancelled = false;
     const decryptedQueryKey = ["decrypted-folder", folderId];
-    const filesToDecrypt = driveFiles;
+    // Sort files to decrypt by createdTime descending (newest first)
+    const filesToDecrypt = [...driveFiles].sort((a, b) => {
+      const dateA = a.createdTime 
+        ? new Date(a.createdTime).getTime() 
+        : (a.modifiedTime ? new Date(a.modifiedTime).getTime() : 0);
+      const dateB = b.createdTime 
+        ? new Date(b.createdTime).getTime() 
+        : (b.modifiedTime ? new Date(b.modifiedTime).getTime() : 0);
+      return dateB - dateA;
+    });
 
     async function processDecryption() {
       // Check if we already have decrypted files in cache for this folder

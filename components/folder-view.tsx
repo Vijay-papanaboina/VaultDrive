@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useMetaFiles } from "@/hooks/use-meta-files";
 import { useCrypto } from "@/hooks/use-crypto";
@@ -8,7 +9,13 @@ import { FolderList } from "@/components/folder-list";
 import { BreadcrumbNav } from "@/components/breadcrumb-nav";
 import FolderLoading from "@/app/drive/[folderId]/loading";
 import type { DriveFolder, BreadcrumbItem } from "@/types";
-import { Folder, RefreshCw, KeyRound, RotateCcw } from "lucide-react";
+import {
+  Folder,
+  RefreshCw,
+  KeyRound,
+  RotateCcw,
+  ArrowUpDown,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -46,19 +53,84 @@ export function FolderView({ folderId }: FolderViewProps) {
     setDismissedPassphraseError,
   } = useCrypto();
 
-  const { data: subFolders = [], isLoading: isFoldersLoading, error: foldersError } = useQuery<DriveFolder[]>({
+  const {
+    data: subFolders = [],
+    isLoading: isFoldersLoading,
+    error: foldersError,
+  } = useQuery<DriveFolder[]>({
     queryKey: ["subfolders", folderId],
     queryFn: () => fetchSubfolders(folderId),
     enabled: !!folderId,
   });
 
-  const { data: breadcrumbs = [], isLoading: isPathLoading, error: pathError } = useQuery<BreadcrumbItem[]>({
+  const {
+    data: breadcrumbs = [],
+    isLoading: isPathLoading,
+    error: pathError,
+  } = useQuery<BreadcrumbItem[]>({
     queryKey: ["breadcrumbs", folderId],
     queryFn: () => fetchBreadcrumbs(folderId),
     enabled: !!folderId,
   });
 
-  const { files, isListLoading, isDecrypting, error: metaError, refetch } = useMetaFiles(folderId);
+  const {
+    files,
+    isListLoading,
+    isDecrypting,
+    error: metaError,
+    refetch,
+  } = useMetaFiles(folderId);
+
+  const [sortBy, setSortBy] = useState<
+    "created" | "modified" | "size" | "name"
+  >("created");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+
+  const handleSortChange = (
+    newSortBy: "created" | "modified" | "size" | "name",
+  ) => {
+    setSortBy(newSortBy);
+    if (newSortBy === "name") {
+      setSortOrder("asc");
+    } else {
+      setSortOrder("desc");
+    }
+  };
+
+  const sortedFiles = [...files].sort((a, b) => {
+    let comparison = 0;
+    if (sortBy === "created") {
+      const dateA = a.driveFile.createdTime
+        ? new Date(a.driveFile.createdTime).getTime()
+        : a.driveFile.modifiedTime
+          ? new Date(a.driveFile.modifiedTime).getTime()
+          : 0;
+      const dateB = b.driveFile.createdTime
+        ? new Date(b.driveFile.createdTime).getTime()
+        : b.driveFile.modifiedTime
+          ? new Date(b.driveFile.modifiedTime).getTime()
+          : 0;
+      comparison = dateA - dateB;
+    } else if (sortBy === "modified") {
+      const dateA = a.driveFile.modifiedTime
+        ? new Date(a.driveFile.modifiedTime).getTime()
+        : 0;
+      const dateB = b.driveFile.modifiedTime
+        ? new Date(b.driveFile.modifiedTime).getTime()
+        : 0;
+      comparison = dateA - dateB;
+    } else if (sortBy === "size") {
+      const sizeA = Number(a.details?.extra?.size_bytes ?? 0);
+      const sizeB = Number(b.details?.extra?.size_bytes ?? 0);
+      comparison = sizeA - sizeB;
+    } else if (sortBy === "name") {
+      comparison = a.driveFile.name.localeCompare(b.driveFile.name, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
+    }
+    return sortOrder === "asc" ? comparison : -comparison;
+  });
 
   const relativePath = breadcrumbs
     .map((b) => b.name)
@@ -71,11 +143,16 @@ export function FolderView({ folderId }: FolderViewProps) {
     return <FolderLoading />;
   }
 
-  const combinedError = metaError || foldersError?.message || pathError?.message || null;
+  const combinedError =
+    metaError || foldersError?.message || pathError?.message || null;
   const showMetaSection = files.length > 0 || isListLoading || !!combinedError;
 
   const hasDecryptionErrors = files.some((f) => f.decryptError);
-  const showPrompt = hasDecryptionErrors && !dismissedPassphraseError && !isDecrypting && !isListLoading;
+  const showPrompt =
+    hasDecryptionErrors &&
+    !dismissedPassphraseError &&
+    !isDecrypting &&
+    !isListLoading;
 
   const handleDismiss = () => {
     setDismissedPassphraseError(true);
@@ -111,40 +188,97 @@ export function FolderView({ folderId }: FolderViewProps) {
             Files
           </h2>
           {showMetaSection && (
-            <Button
-              id="refresh-meta-btn"
-              variant="outline"
-              size="xs"
-              className="gap-1 bg-white/5 border-white/10 text-muted-foreground hover:bg-white/10 hover:text-foreground"
-              disabled={isListLoading || isDecrypting}
-              onClick={() => refetch()}
-            >
-              <RefreshCw className="h-3 w-3" />
-              Refresh
-            </Button>
+            <div className="flex items-center gap-2">
+              <select
+                id="sort-meta-select"
+                aria-label="Sort files by"
+                value={sortBy}
+                onChange={(e) => handleSortChange(e.target.value as any)}
+                className="h-7 rounded-md border border-white/10 bg-white/5 px-2 text-xs text-muted-foreground hover:bg-white/10 hover:text-foreground focus:outline-none cursor-pointer"
+              >
+                <option
+                  value="created"
+                  className="bg-neutral-900 text-foreground"
+                >
+                  Sort: Created Time
+                </option>
+                <option
+                  value="modified"
+                  className="bg-neutral-900 text-foreground"
+                >
+                  Sort: Modified Time
+                </option>
+                <option value="size" className="bg-neutral-900 text-foreground">
+                  Sort: Original Size
+                </option>
+                <option value="name" className="bg-neutral-900 text-foreground">
+                  Sort: Meta Name
+                </option>
+              </select>
+              <Button
+                id="toggle-sort-order-btn"
+                variant="outline"
+                size="xs"
+                className="h-7 w-7 p-0 bg-white/5 border-white/10 text-muted-foreground hover:bg-white/10 hover:text-foreground"
+                onClick={() =>
+                  setSortOrder((o) => (o === "asc" ? "desc" : "asc"))
+                }
+                aria-label={`Switch to ${sortOrder === "asc" ? "descending" : "ascending"} sort order`}
+                title={`Switch to ${sortOrder === "asc" ? "descending" : "ascending"} sort order`}
+              >
+                <ArrowUpDown className="h-3 w-3" />
+              </Button>
+              <Button
+                id="refresh-meta-btn"
+                variant="outline"
+                size="xs"
+                className="gap-1 bg-white/5 border-white/10 text-muted-foreground hover:bg-white/10 hover:text-foreground"
+                disabled={isListLoading || isDecrypting}
+                onClick={() => refetch()}
+              >
+                <RefreshCw className="h-3 w-3" />
+                Refresh
+              </Button>
+            </div>
           )}
         </div>
 
         {!showMetaSection ? (
           <div className="rounded-xl border border-white/8 bg-white/3 py-12 text-center">
             <p className="text-sm text-muted-foreground">
-              No <code className="rounded bg-white/5 px-1 text-xs">.meta</code> files in this folder.
+              No <code className="rounded bg-white/5 px-1 text-xs">.meta</code>{" "}
+              files in this folder.
             </p>
           </div>
         ) : (
-          <MetaGrid files={files} isLoading={isListLoading} error={combinedError} relativePath={relativePath} />
+          <MetaGrid
+            files={sortedFiles}
+            isLoading={isListLoading}
+            error={combinedError}
+            relativePath={relativePath}
+          />
         )}
       </section>
 
-      <Dialog open={showPrompt} onOpenChange={(open) => { if (!open) handleDismiss(); }}>
-        <DialogContent id="decryption-error-prompt-dialog" className="sm:max-w-sm" showCloseButton={false}>
+      <Dialog
+        open={showPrompt}
+        onOpenChange={(open) => {
+          if (!open) handleDismiss();
+        }}
+      >
+        <DialogContent
+          id="decryption-error-prompt-dialog"
+          className="sm:max-w-sm"
+          showCloseButton={false}
+        >
           <DialogHeader>
             <div className="mb-2 flex h-10 w-10 items-center justify-center rounded-xl border border-amber-500/30 bg-amber-500/15">
               <KeyRound className="h-5 w-5 text-amber-400" />
             </div>
             <DialogTitle>Decryption failed for some files</DialogTitle>
             <DialogDescription>
-              Some files in this folder could not be decrypted. This might be due to a wrong passphrase. Would you like to re-enter it?
+              Some files in this folder could not be decrypted. This might be
+              due to a wrong passphrase. Would you like to re-enter it?
             </DialogDescription>
           </DialogHeader>
           <div className="flex gap-3 mt-4">
@@ -155,10 +289,7 @@ export function FolderView({ folderId }: FolderViewProps) {
             >
               Cancel
             </Button>
-            <Button
-              className="flex-1 gap-2"
-              onClick={handleReenter}
-            >
+            <Button className="flex-1 gap-2" onClick={handleReenter}>
               <RotateCcw className="h-4 w-4" />
               Re-enter
             </Button>

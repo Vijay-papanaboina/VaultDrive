@@ -12,6 +12,7 @@ export interface DriveMetaFile {
   name: string; // e.g. "backup.enc.meta"
   size: string;
   modifiedTime: string;
+  createdTime?: string;
 }
 
 /**
