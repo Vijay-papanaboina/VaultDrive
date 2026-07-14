@@ -1,9 +1,17 @@
 "use client";
 
-import { signIn } from "@/lib/auth-client";
-import { Shield, Lock, FolderKey, Eye, ArrowRight, Loader2 } from "lucide-react";
+import { signIn, useSession } from "@/lib/auth-client";
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import {
+  Shield,
+  Lock,
+  FolderKey,
+  Eye,
+  ArrowRight,
+  Loader2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useState } from "react";
 
 function GoogleIcon() {
   return (
@@ -50,22 +58,33 @@ const features = [
 ];
 
 export default function HomePage() {
+  const { data: session, isPending } = useSession();
+  const router = useRouter();
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (session) {
+      router.replace("/drive");
+    }
+  }, [session, router]);
 
   async function handleGoogleSignIn() {
     setLoading(true);
     try {
-      await signIn.social({
+      const res = await signIn.social({
         provider: "google",
         callbackURL: "/drive",
       });
+      if (res?.error) {
+        setLoading(false);
+      }
     } catch {
       setLoading(false);
     }
   }
 
   return (
-    <main className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden px-4">
+    <main className="relative flex min-h-screen flex-col items-center justify-center overflow-x-hidden px-4 py-12 sm:py-20">
       {/* Ambient background glows */}
       <div
         aria-hidden="true"
@@ -127,23 +146,28 @@ export default function HomePage() {
           <Button
             id="google-signin-btn"
             onClick={handleGoogleSignIn}
-            disabled={loading}
+            disabled={loading || isPending || !!session}
             className="w-full gap-2.5 bg-white text-gray-900 hover:bg-gray-100 dark:bg-white dark:text-gray-900 dark:hover:bg-gray-100"
             size="lg"
           >
-            {loading ? (
+            {loading || isPending || !!session ? (
               <Loader2 className="h-5 w-5 animate-spin" />
             ) : (
               <GoogleIcon />
             )}
-            {loading ? "Connecting…" : "Sign in with Google"}
-            {!loading && <ArrowRight className="ml-auto h-4 w-4" />}
+            {loading || isPending || !!session
+              ? session
+                ? "Redirecting…"
+                : "Connecting…"
+              : "Sign in with Google"}
+            {!(loading || isPending || !!session) && (
+              <ArrowRight className="ml-auto h-4 w-4" />
+            )}
           </Button>
 
           <p className="mt-4 text-center text-xs text-muted-foreground">
-            Requests{" "}
-            <code className="text-white/60">drive.readonly</code> scope only.
-            Your passphrase is never sent anywhere.
+            Requests <code className="text-white/60">drive.readonly</code> scope
+            only. Your passphrase is never sent anywhere.
           </p>
         </div>
 

@@ -122,13 +122,17 @@ function detectFileType(filePath) {
         return { isAge: true, type: "packaged", nameLen };
       }
     }
-  } catch (e) {
-    // Ignore errors
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Error detecting file type for ${filePath}: ${message}`);
   } finally {
     if (fd !== undefined) {
       try {
         fs.closeSync(fd);
-      } catch (e) {}
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`Error closing file descriptor for ${filePath}: ${message}`);
+      }
     }
   }
   return { isAge: false };
@@ -152,7 +156,8 @@ async function decryptPackagedFile(filePath, nameLen, outputDir, identity) {
     const nameBytes = await nameDec.decrypt(encNameBytes);
     originalName = Buffer.from(nameBytes).toString("utf8");
   } catch (err) {
-    throw new Error("Decryption failed for filename. Wrong passphrase?");
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Decryption failed for filename: ${message}. Wrong passphrase?`);
   }
 
   const resolvedOutputPath = path.join(outputDir, originalName);

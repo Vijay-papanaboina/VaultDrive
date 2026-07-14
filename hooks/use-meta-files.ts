@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCrypto } from "@/hooks/use-crypto";
-import type { ProgressiveMetaFile, DriveMetaFile } from "@/types";
+import type { ProgressiveMetaFile, DriveMetaFile, MetaDetails } from "@/types";
 
 interface UseMetaFilesResult {
   files: ProgressiveMetaFile[];
@@ -109,7 +109,15 @@ export function useMetaFiles(
 
           // Delegate CPU heavy decryption to worker and await result
           const worker = workers[index % workerCount];
-          const decrypted = await new Promise<{ success: boolean; result?: any; error?: string }>((resolve) => {
+          const decrypted = await new Promise<{
+            success: boolean;
+            result?: {
+              details: MetaDetails;
+              thumbnailBytes?: Uint8Array | null;
+              thumbnailMimeType?: string | null;
+            };
+            error?: string;
+          }>((resolve) => {
             let resolved = false;
 
             const cleanup = () => {
@@ -159,7 +167,7 @@ export function useMetaFiles(
               const updated = [...prev];
               const pos = updated.findIndex((f) => f.driveFile.id === file.id);
               if (pos !== -1) {
-                if (decrypted.success) {
+                if (decrypted.success && decrypted.result) {
                   updated[pos] = {
                     ...updated[pos],
                     decrypted: true,
@@ -184,7 +192,7 @@ export function useMetaFiles(
               const updated = [...prev];
               const pos = updated.findIndex((f) => f.driveFile.id === file.id);
               if (pos !== -1) {
-                if (decrypted.success) {
+                if (decrypted.success && decrypted.result) {
                   updated[pos] = {
                     ...updated[pos],
                     decrypted: true,

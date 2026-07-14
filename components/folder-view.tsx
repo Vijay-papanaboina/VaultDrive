@@ -47,7 +47,6 @@ async function fetchBreadcrumbs(folderId: string): Promise<BreadcrumbItem[]> {
 
 export function FolderView({ folderId }: FolderViewProps) {
   const {
-    hasPassphrase,
     clearPassphrase,
     dismissedPassphraseError,
     setDismissedPassphraseError,
@@ -193,7 +192,7 @@ export function FolderView({ folderId }: FolderViewProps) {
                 id="sort-meta-select"
                 aria-label="Sort files by"
                 value={sortBy}
-                onChange={(e) => handleSortChange(e.target.value as any)}
+                onChange={(e) => handleSortChange(e.target.value as "created" | "modified" | "size" | "name")}
                 className="h-7 rounded-md border border-white/10 bg-white/5 px-2 text-xs text-muted-foreground hover:bg-white/10 hover:text-foreground focus:outline-none cursor-pointer"
               >
                 <option
