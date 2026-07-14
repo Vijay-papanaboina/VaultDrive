@@ -179,27 +179,29 @@ export function useMetaFiles(
             });
 
             // Update React Query Cache independently outside of React state updaters
-            const cachedList = queryClient.getQueryData<ProgressiveMetaFile[]>(decryptedQueryKey) || [];
-            const updatedList = [...cachedList];
-            const pos = updatedList.findIndex((f) => f.driveFile.id === file.id);
-            if (pos !== -1) {
-              if (decrypted.success) {
-                updatedList[pos] = {
-                  ...updatedList[pos],
-                  decrypted: true,
-                  details: decrypted.result.details,
-                  thumbnailBytes: decrypted.result.thumbnailBytes,
-                  thumbnailMimeType: decrypted.result.thumbnailMimeType,
-                };
-              } else {
-                updatedList[pos] = {
-                  ...updatedList[pos],
-                  decrypted: true,
-                  decryptError: decrypted.error || "Decryption failed",
-                };
+            queryClient.setQueryData<ProgressiveMetaFile[]>(decryptedQueryKey, (prev) => {
+              if (!prev) return prev;
+              const updated = [...prev];
+              const pos = updated.findIndex((f) => f.driveFile.id === file.id);
+              if (pos !== -1) {
+                if (decrypted.success) {
+                  updated[pos] = {
+                    ...updated[pos],
+                    decrypted: true,
+                    details: decrypted.result.details,
+                    thumbnailBytes: decrypted.result.thumbnailBytes,
+                    thumbnailMimeType: decrypted.result.thumbnailMimeType,
+                  };
+                } else {
+                  updated[pos] = {
+                    ...updated[pos],
+                    decrypted: true,
+                    decryptError: decrypted.error || "Decryption failed",
+                  };
+                }
               }
-              queryClient.setQueryData(decryptedQueryKey, updatedList);
-            }
+              return updated;
+            });
           }
         } catch (err) {
           if (!cancelled) {
@@ -220,17 +222,19 @@ export function useMetaFiles(
             });
 
             // Update React Query Cache independently outside of React state updaters
-            const cachedList = queryClient.getQueryData<ProgressiveMetaFile[]>(decryptedQueryKey) || [];
-            const updatedList = [...cachedList];
-            const pos = updatedList.findIndex((f) => f.driveFile.id === file.id);
-            if (pos !== -1) {
-              updatedList[pos] = {
-                ...updatedList[pos],
-                decrypted: true,
-                decryptError: msg,
-              };
-              queryClient.setQueryData(decryptedQueryKey, updatedList);
-            }
+            queryClient.setQueryData<ProgressiveMetaFile[]>(decryptedQueryKey, (prev) => {
+              if (!prev) return prev;
+              const updated = [...prev];
+              const pos = updated.findIndex((f) => f.driveFile.id === file.id);
+              if (pos !== -1) {
+                updated[pos] = {
+                  ...updated[pos],
+                  decrypted: true,
+                  decryptError: msg,
+                };
+              }
+              return updated;
+            });
           }
         }
       }
@@ -245,12 +249,14 @@ export function useMetaFiles(
         return;
       }
 
-      // Initialize list (use cached if partially decrypted, otherwise map initial)
-      const currentFiles = cached && cached.length === filesToDecrypt.length
-        ? cached
-        : mapInitialFiles(filesToDecrypt);
+      // Reconcile cached files by ID before seeding
+      const cachedById = new Map(cached?.map((file) => [file.driveFile.id, file]));
+      const currentFiles = mapInitialFiles(filesToDecrypt).map(
+        (file) => cachedById.get(file.driveFile.id) ?? file
+      );
 
       setFiles(currentFiles);
+      queryClient.setQueryData(decryptedQueryKey, currentFiles);
 
       const firstUndecryptedIdx = currentFiles.findIndex((f) => !f.decrypted);
       if (firstUndecryptedIdx === -1) {

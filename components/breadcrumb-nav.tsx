@@ -20,27 +20,29 @@ export function BreadcrumbNav({ path }: BreadcrumbNavProps) {
         <span>My Drive</span>
       </Link>
 
-      {path.map((item, i) => {
-        const isLast = i === path.length - 1;
-        return (
-          <span key={item.id} className="flex items-center gap-1">
-            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50" />
-            {isLast ? (
-              <span className="rounded-md px-1.5 py-0.5 font-medium text-foreground">
-                {item.name}
-              </span>
-            ) : (
-              <Link
-                href={`/drive/${item.id}`}
-                id={`breadcrumb-${item.id}`}
-                className="rounded-md px-1.5 py-0.5 text-muted-foreground transition-colors hover:text-foreground"
-              >
-                {item.name}
-              </Link>
-            )}
-          </span>
-        );
-      })}
+      {path
+        .filter((item) => item.name.toLowerCase() !== "my drive")
+        .map((item, i, filteredArray) => {
+          const isLast = i === filteredArray.length - 1;
+          return (
+            <span key={item.id} className="flex items-center gap-1">
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50" />
+              {isLast ? (
+                <span className="rounded-md px-1.5 py-0.5 font-medium text-foreground">
+                  {item.name}
+                </span>
+              ) : (
+                <Link
+                  href={`/drive/${item.id}`}
+                  id={`breadcrumb-${item.id}`}
+                  className="rounded-md px-1.5 py-0.5 text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  {item.name}
+                </Link>
+              )}
+            </span>
+          );
+        })}
     </nav>
   );
 }

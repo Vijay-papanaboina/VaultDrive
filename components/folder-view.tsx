@@ -137,7 +137,7 @@ export function FolderView({ folderId }: FolderViewProps) {
     .filter((name) => name.toLowerCase() !== "my drive")
     .join("/");
 
-  const isLoading = isFoldersLoading || isPathLoading || isListLoading;
+  const isLoading = isFoldersLoading || isPathLoading;
 
   if (isLoading) {
     return <FolderLoading />;
