@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { decryptMetaZip } from "@/lib/crypto";
 import { useCrypto } from "@/hooks/use-crypto";
 import type { ProgressiveMetaFile, DriveMetaFile } from "@/types";
 
@@ -14,7 +13,7 @@ interface UseMetaFilesResult {
   refetch: () => void;
 }
 
-const BATCH_SIZE = 5;
+const DOWNLOAD_CONCURRENCY = 20;
 
 async function fetchMetaList(folderId: string): Promise<DriveMetaFile[]> {
   const res = await fetch(`/api/drive/meta?folderId=${folderId}`);
@@ -78,6 +77,165 @@ export function useMetaFiles(
       return dateB - dateA;
     });
 
+    // Worker pool setup: dynamically capped at number of logical CPU cores (between 2 and 10)
+    const workerCount = Math.min(navigator.hardwareConcurrency || 2, 10);
+    const workers: Worker[] = [];
+    for (let i = 0; i < workerCount; i++) {
+      const worker = new Worker(new URL("../lib/decrypt.worker.ts", import.meta.url));
+      workers.push(worker);
+    }
+
+    let nextJobIndex = 0;
+
+    async function downloader() {
+      // Map initial files to decrypt
+      const currentFiles = queryClient.getQueryData<ProgressiveMetaFile[]>(decryptedQueryKey) || [];
+
+      while (nextJobIndex < filesToDecrypt.length && !cancelled) {
+        const index = nextJobIndex++;
+        if (index >= filesToDecrypt.length) break;
+
+        const file = filesToDecrypt[index];
+        const match = currentFiles.find((f) => f.driveFile.id === file.id);
+        if (match && match.decrypted) continue;
+
+        try {
+          // Fetch bytes on main thread (highly non-blocking I/O)
+          const res = await fetch(`/api/drive/meta/${file.id}`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const bytes = new Uint8Array(await res.arrayBuffer());
+
+          if (cancelled) break;
+
+          // Delegate CPU heavy decryption to worker and await result
+          const worker = workers[index % workerCount];
+          const decrypted = await new Promise<{ success: boolean; result?: any; error?: string }>((resolve) => {
+            let resolved = false;
+
+            const cleanup = () => {
+              worker.removeEventListener("message", handleMessage);
+              worker.removeEventListener("error", handleError);
+              clearTimeout(timeoutId);
+            };
+
+            const handleMessage = (e: MessageEvent) => {
+              if (e.data.fileId === file.id) {
+                cleanup();
+                if (!resolved) {
+                  resolved = true;
+                  resolve(e.data);
+                }
+              }
+            };
+
+            const handleError = (e: ErrorEvent) => {
+              cleanup();
+              if (!resolved) {
+                resolved = true;
+                resolve({ success: false, error: e.message || "Worker error occurred" });
+              }
+            };
+
+            const timeoutId = setTimeout(() => {
+              cleanup();
+              if (!resolved) {
+                resolved = true;
+                resolve({ success: false, error: "Decryption timeout" });
+              }
+            }, 30000); // 30s bounding timeout
+
+            worker.addEventListener("message", handleMessage);
+            worker.addEventListener("error", handleError);
+            worker.postMessage({
+              fileId: file.id,
+              identity: passphrase!,
+              encryptedData: bytes,
+            }, [bytes.buffer]); // Transfer buffer (zero-copy transfer)
+          });
+
+          if (!cancelled) {
+            // Update React state purely
+            setFiles((prev) => {
+              const updated = [...prev];
+              const pos = updated.findIndex((f) => f.driveFile.id === file.id);
+              if (pos !== -1) {
+                if (decrypted.success) {
+                  updated[pos] = {
+                    ...updated[pos],
+                    decrypted: true,
+                    details: decrypted.result.details,
+                    thumbnailBytes: decrypted.result.thumbnailBytes,
+                    thumbnailMimeType: decrypted.result.thumbnailMimeType,
+                  };
+                } else {
+                  updated[pos] = {
+                    ...updated[pos],
+                    decrypted: true,
+                    decryptError: decrypted.error || "Decryption failed",
+                  };
+                }
+              }
+              return updated;
+            });
+
+            // Update React Query Cache independently outside of React state updaters
+            const cachedList = queryClient.getQueryData<ProgressiveMetaFile[]>(decryptedQueryKey) || [];
+            const updatedList = [...cachedList];
+            const pos = updatedList.findIndex((f) => f.driveFile.id === file.id);
+            if (pos !== -1) {
+              if (decrypted.success) {
+                updatedList[pos] = {
+                  ...updatedList[pos],
+                  decrypted: true,
+                  details: decrypted.result.details,
+                  thumbnailBytes: decrypted.result.thumbnailBytes,
+                  thumbnailMimeType: decrypted.result.thumbnailMimeType,
+                };
+              } else {
+                updatedList[pos] = {
+                  ...updatedList[pos],
+                  decrypted: true,
+                  decryptError: decrypted.error || "Decryption failed",
+                };
+              }
+              queryClient.setQueryData(decryptedQueryKey, updatedList);
+            }
+          }
+        } catch (err) {
+          if (!cancelled) {
+            const msg = err instanceof Error ? err.message : "Decryption failed";
+
+            // Update React state purely
+            setFiles((prev) => {
+              const updated = [...prev];
+              const pos = updated.findIndex((f) => f.driveFile.id === file.id);
+              if (pos !== -1) {
+                updated[pos] = {
+                  ...updated[pos],
+                  decrypted: true,
+                  decryptError: msg,
+                };
+              }
+              return updated;
+            });
+
+            // Update React Query Cache independently outside of React state updaters
+            const cachedList = queryClient.getQueryData<ProgressiveMetaFile[]>(decryptedQueryKey) || [];
+            const updatedList = [...cachedList];
+            const pos = updatedList.findIndex((f) => f.driveFile.id === file.id);
+            if (pos !== -1) {
+              updatedList[pos] = {
+                ...updatedList[pos],
+                decrypted: true,
+                decryptError: msg,
+              };
+              queryClient.setQueryData(decryptedQueryKey, updatedList);
+            }
+          }
+        }
+      }
+    }
+
     async function processDecryption() {
       // Check if we already have decrypted files in cache for this folder
       const cached = queryClient.getQueryData<ProgressiveMetaFile[]>(decryptedQueryKey);
@@ -103,61 +261,9 @@ export function useMetaFiles(
       setIsDecrypting(true);
       setDecryptError(null);
 
-      // Decrypt in batches, starting from first undecrypted
-      for (let i = 0; i < filesToDecrypt.length; i += BATCH_SIZE) {
-        if (cancelled) break;
-
-        const batch = filesToDecrypt.slice(i, i + BATCH_SIZE);
-        const isBatchDecrypted = batch.every((file) => {
-          const match = currentFiles.find((f) => f.driveFile.id === file.id);
-          return match && match.decrypted;
-        });
-        if (isBatchDecrypted) continue;
-
-        const results = await Promise.allSettled(
-          batch.map(async (file) => {
-            const res = await fetch(`/api/drive/meta/${file.id}`);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const bytes = new Uint8Array(await res.arrayBuffer());
-            return decryptMetaZip(passphrase!, bytes);
-          })
-        );
-
-        if (cancelled) break;
-
-        setFiles((prev) => {
-          const updated = [...prev];
-          results.forEach((result, idx) => {
-            const fileId = batch[idx].id;
-            const pos = updated.findIndex((f) => f.driveFile.id === fileId);
-            if (pos === -1) return;
-
-            if (result.status === "fulfilled") {
-              const { details, thumbnailBytes, thumbnailMimeType } = result.value;
-              updated[pos] = {
-                ...updated[pos],
-                decrypted: true,
-                details,
-                thumbnailBytes,
-                thumbnailMimeType,
-              };
-            } else {
-              const msg = result.reason instanceof Error
-                ? result.reason.message
-                : "Decryption failed";
-              updated[pos] = {
-                ...updated[pos],
-                decrypted: true,
-                decryptError: msg,
-              };
-            }
-          });
-
-          // Save progressive state to React Query Cache
-          queryClient.setQueryData(decryptedQueryKey, updated);
-          return updated;
-        });
-      }
+      // Start DOWNLOAD_CONCURRENCY concurrent download routines
+      const pool = Array.from({ length: DOWNLOAD_CONCURRENCY }).map(() => downloader());
+      await Promise.all(pool);
 
       if (!cancelled) setIsDecrypting(false);
     }
@@ -166,6 +272,7 @@ export function useMetaFiles(
 
     return () => {
       cancelled = true;
+      workers.forEach((w) => w.terminate());
     };
   }, [
     folderId,
