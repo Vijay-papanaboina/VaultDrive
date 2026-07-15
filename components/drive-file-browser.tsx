@@ -52,7 +52,7 @@ export function DriveFileBrowser({
     setSearchQuery,
     sortBy,
     sortOrder,
-    filteredFiles,
+    resultCount,
     sortedFiles,
     handleSortChange,
     toggleSortOrder,
@@ -165,7 +165,7 @@ export function DriveFileBrowser({
         <div className="rounded-xl border border-white/8 bg-white/3 py-12 text-center">
           <p className="text-sm text-muted-foreground">{emptyMessage}</p>
         </div>
-      ) : files.length > 0 && filteredFiles.length === 0 ? (
+      ) : files.length > 0 && resultCount === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-xl border border-white/8 bg-white/3 py-16 text-center">
           <FileX className="h-10 w-10 text-muted-foreground/40" />
           <div>

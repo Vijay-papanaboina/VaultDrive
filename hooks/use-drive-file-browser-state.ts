@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import type { ProgressiveMetaFile } from "@/types";
 
 interface UseDriveFileBrowserStateOptions {
@@ -28,64 +28,120 @@ export function useDriveFileBrowserState({
   const [sortBy, setSortBy] = useState<SortBy>("created");
   const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
   const searchQuery = searchState.folderId === folderId ? searchState.query : "";
+  const [workerResult, setWorkerResult] = useState<{
+    key: string;
+    orderedIds: string[];
+  }>({
+    key: "",
+    orderedIds: files.map((file) => file.driveFile.id),
+  });
+  const workerRef = useRef<Worker | null>(null);
+  const requestIdRef = useRef(0);
+  const latestAppliedRequestIdRef = useRef(0);
+  const requestKeyByIdRef = useRef(new Map<number, string>());
 
-  const filteredFiles = useMemo(() => {
-    if (!searchQuery.trim()) return files;
-    const queryNormalized = normalize(searchQuery);
-    return files.filter((file) => {
-      const origNormalized = normalize(file.originalFileName);
-      const decNormalized = file.details?.name ? normalize(file.details.name) : "";
-      return (
-        origNormalized.includes(queryNormalized) ||
-        decNormalized.includes(queryNormalized)
-      );
+  const fileById = useMemo(() => {
+    return new Map(files.map((file) => [file.driveFile.id, file]));
+  }, [files]);
+
+  const indexedFiles = useMemo(() => {
+    return files.map((file) => ({
+      id: file.driveFile.id,
+      originalNameNormalized: normalize(file.originalFileName),
+      detailsNameNormalized: file.details?.name ? normalize(file.details.name) : "",
+      createdAtMs: file.driveFile.createdTime
+        ? Date.parse(file.driveFile.createdTime)
+        : file.driveFile.modifiedTime
+          ? Date.parse(file.driveFile.modifiedTime)
+          : 0,
+      modifiedAtMs: file.driveFile.modifiedTime ? Date.parse(file.driveFile.modifiedTime) : 0,
+      originalSizeBytes: Number(file.details?.extra?.size_bytes ?? 0),
+      metaName: file.driveFile.name,
+    }));
+  }, [files]);
+
+  const filesKey = useMemo(() => {
+    const head = files.slice(0, 8).map((file) => file.driveFile.id).join("|");
+    const tail = files.slice(-2).map((file) => file.driveFile.id).join("|");
+    return `${files.length}::${head}::${tail}`;
+  }, [files]);
+  const currentComputeKey = `${filesKey}::${searchQuery}::${sortBy}::${sortOrder}`;
+
+  useEffect(() => {
+    const worker = new Worker(
+      new URL("../lib/drive-browser.worker.ts", import.meta.url)
+    );
+    workerRef.current = worker;
+
+    const handleMessage = (event: MessageEvent<{ requestId: number; orderedIds: string[] }>) => {
+      const { requestId, orderedIds: nextOrderedIds } = event.data;
+      if (requestId < latestAppliedRequestIdRef.current) return;
+
+      const requestKey = requestKeyByIdRef.current.get(requestId);
+      if (!requestKey) return;
+
+      latestAppliedRequestIdRef.current = requestId;
+      setWorkerResult({
+        key: requestKey,
+        orderedIds: nextOrderedIds,
+      });
+      requestKeyByIdRef.current.delete(requestId);
+    };
+
+    worker.addEventListener("message", handleMessage);
+
+    return () => {
+      worker.removeEventListener("message", handleMessage);
+      worker.terminate();
+      workerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    workerRef.current?.postMessage({
+      type: "set-files",
+      records: indexedFiles,
     });
-  }, [files, searchQuery]);
+  }, [indexedFiles]);
+
+  useEffect(() => {
+    if (!workerRef.current) return;
+
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    requestKeyByIdRef.current.set(requestId, currentComputeKey);
+
+    workerRef.current.postMessage({
+      type: "compute",
+      requestId,
+      searchQuery,
+      sortBy,
+      sortOrder,
+    });
+  }, [currentComputeKey, indexedFiles, searchQuery, sortBy, sortOrder]);
 
   const sortedFiles = useMemo(() => {
-    return [...filteredFiles].sort((a, b) => {
-      let comparison = 0;
+    if (workerResult.key !== currentComputeKey) return files;
 
-      if (sortBy === "created") {
-        const dateA = a.driveFile.createdTime
-          ? new Date(a.driveFile.createdTime).getTime()
-          : a.driveFile.modifiedTime
-            ? new Date(a.driveFile.modifiedTime).getTime()
-            : 0;
-        const dateB = b.driveFile.createdTime
-          ? new Date(b.driveFile.createdTime).getTime()
-          : b.driveFile.modifiedTime
-            ? new Date(b.driveFile.modifiedTime).getTime()
-            : 0;
-        comparison = dateA - dateB;
-      } else if (sortBy === "modified") {
-        const dateA = a.driveFile.modifiedTime
-          ? new Date(a.driveFile.modifiedTime).getTime()
-          : 0;
-        const dateB = b.driveFile.modifiedTime
-          ? new Date(b.driveFile.modifiedTime).getTime()
-          : 0;
-        comparison = dateA - dateB;
-      } else if (sortBy === "size") {
-        const sizeA = Number(a.details?.extra?.size_bytes ?? 0);
-        const sizeB = Number(b.details?.extra?.size_bytes ?? 0);
-        comparison = sizeA - sizeB;
-      } else {
-        comparison = a.driveFile.name.localeCompare(b.driveFile.name, undefined, {
-          numeric: true,
-          sensitivity: "base",
-        });
-      }
+    return workerResult.orderedIds
+      .map((id) => fileById.get(id))
+      .filter((file): file is ProgressiveMetaFile => Boolean(file));
+  }, [currentComputeKey, fileById, files, workerResult]);
 
-      return sortOrder === "asc" ? comparison : -comparison;
+  function updateSearchQuery(query: string) {
+    setSearchState({ folderId, query });
+  }
+
+  function updateSort(sortByValue: SortBy, sortOrderValue: SortOrder) {
+    startTransition(() => {
+      setSortBy(sortByValue);
+      setSortOrder(sortOrderValue);
     });
-  }, [filteredFiles, sortBy, sortOrder]);
+  }
 
   function handleSortChange(nextSortBy: SortBy) {
-    const applyChange = () => {
-      setSortBy(nextSortBy);
-      setSortOrder(nextSortBy === "name" ? "asc" : "desc");
-    };
+    const nextSortOrder = nextSortBy === "name" ? "asc" : "desc";
+    const applyChange = () => updateSort(nextSortBy, nextSortOrder);
 
     if (deferSortChange) {
       window.setTimeout(applyChange, 50);
@@ -96,15 +152,17 @@ export function useDriveFileBrowserState({
   }
 
   function toggleSortOrder() {
-    setSortOrder((current) => (current === "asc" ? "desc" : "asc"));
+    startTransition(() => {
+      setSortOrder((current) => (current === "asc" ? "desc" : "asc"));
+    });
   }
 
   return {
     searchQuery,
-    setSearchQuery: (query: string) => setSearchState({ folderId, query }),
+    setSearchQuery: updateSearchQuery,
     sortBy,
     sortOrder,
-    filteredFiles,
+    resultCount: sortedFiles.length,
     sortedFiles,
     handleSortChange,
     toggleSortOrder,

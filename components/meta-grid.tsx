@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MetaCard } from "@/components/meta-card";
 import { MetaDetailModal } from "@/components/meta-detail-modal";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -17,6 +17,16 @@ interface MetaGridProps {
   relativePath: string;
   /** If provided, overrides relativePath on a per-file basis (used in recursive/search views) */
   getRelativePath?: (file: ProgressiveMetaFile) => string;
+}
+
+const INITIAL_VISIBLE_ROWS = 3;
+const VISIBLE_ROW_STEP = 3;
+
+function getColumnCount(viewportWidth: number) {
+  if (viewportWidth >= 1280) return 4;
+  if (viewportWidth >= 1024) return 3;
+  if (viewportWidth >= 640) return 2;
+  return 1;
 }
 
 /** Detect age decryption failure (wrong passphrase), not format errors */
@@ -50,8 +60,66 @@ function SkeletonCard() {
 
 export function MetaGrid({ files, isLoading, error, relativePath, getRelativePath }: MetaGridProps) {
   const [selected, setSelected] = useState<DecryptedMeta | null>(null);
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window === "undefined" ? 1280 : window.innerWidth
+  );
   const { clearPassphrase } = useCrypto();
   const { isSelectionMode, isFileSelected, toggleFileSelection } = useSelection();
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function handleResize() {
+      setViewportWidth(window.innerWidth);
+    }
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  const columnCount = getColumnCount(viewportWidth);
+  const visibleSetKey = useMemo(() => {
+    const head = files.slice(0, 8).map((file) => file.driveFile.id).join("|");
+    const tail = files.slice(-2).map((file) => file.driveFile.id).join("|");
+    return `${files.length}::${head}::${tail}::${columnCount}`;
+  }, [files, columnCount]);
+  const [visibleState, setVisibleState] = useState({
+    key: "",
+    count: 0,
+  });
+  const initialVisibleCount = Math.max(INITIAL_VISIBLE_ROWS * columnCount, columnCount);
+  const visibleCount =
+    visibleState.key === visibleSetKey ? visibleState.count : initialVisibleCount;
+  const clampedVisibleCount = Math.min(files.length, visibleCount);
+  const visibleFiles = files.slice(0, clampedVisibleCount);
+  const hasMore = clampedVisibleCount < files.length;
+
+  useEffect(() => {
+    if (!hasMore || !loadMoreRef.current) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries[0]?.isIntersecting) return;
+
+        setVisibleState((prev) => {
+          const nextBaseCount =
+            prev.key === visibleSetKey ? prev.count : initialVisibleCount;
+          const nextCount = Math.min(
+            files.length,
+            nextBaseCount + VISIBLE_ROW_STEP * columnCount
+          );
+
+          if (nextCount === nextBaseCount) return prev;
+          return { key: visibleSetKey, count: nextCount };
+        });
+      },
+      {
+        rootMargin: "1200px 0px",
+      }
+    );
+
+    observer.observe(loadMoreRef.current);
+    return () => observer.disconnect();
+  }, [columnCount, files.length, hasMore, initialVisibleCount, visibleSetKey]);
 
   const handleCardClick = (file: ProgressiveMetaFile) => {
     const fileId = file.driveFile.name.replace(".meta", "");
@@ -148,7 +216,7 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
   return (
     <>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {files.map((meta) => {
+        {visibleFiles.map((meta) => {
           const fileId = meta.driveFile.name.replace(".meta", "");
           return (
             <MetaCard
@@ -161,6 +229,14 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
           );
         })}
       </div>
+
+      {hasMore && (
+        <div ref={loadMoreRef} className="flex justify-center py-6">
+          <p className="text-xs text-muted-foreground/60">
+            Showing {clampedVisibleCount} of {files.length} files
+          </p>
+        </div>
+      )}
 
       <MetaDetailModal
         meta={selected}
