@@ -105,34 +105,3 @@ export async function decryptMetaZip(
   return { details, thumbnailBytes, thumbnailMimeType };
 }
 
-/**
- * Validate a passphrase by attempting to decrypt a test file.
- * Returns true on success, false on wrong passphrase.
- */
-export async function validatePassphrase(
-  passphrase: string,
-  testFileId: string
-): Promise<boolean> {
-  try {
-    const res = await fetch(`/api/drive/meta/${testFileId}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    const identity = await deriveAgeIdentity(passphrase);
-    await decryptMetaZip(identity, bytes);
-    return true;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message.toLowerCase() : "";
-    if (
-      msg.includes("passphrase") ||
-      msg.includes("decrypt") ||
-      msg.includes("header") ||
-      msg.includes("mac") ||
-      msg.includes("invalid") ||
-      msg.includes("details.json") ||
-      msg.includes("thumbnail")
-    ) {
-      return false;
-    }
-    throw err;
-  }
-}

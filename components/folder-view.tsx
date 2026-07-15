@@ -182,9 +182,7 @@ export function FolderView({ folderId }: FolderViewProps) {
   const hasDecryptionErrors = files.some((f) => f.decryptError);
   const showPrompt =
     hasDecryptionErrors &&
-    !dismissedPassphraseError &&
-    !isDecrypting &&
-    !isListLoading;
+    !dismissedPassphraseError;
 
   const handleDismiss = () => {
     setDismissedPassphraseError(true);
