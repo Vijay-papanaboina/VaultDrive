@@ -24,7 +24,14 @@ export async function GET(request: NextRequest) {
     const parentId = searchParams.get("parentId") ?? "root";
 
     const folders = await listFolders(tokenResult.accessToken, parentId);
-    return NextResponse.json({ folders });
+    return NextResponse.json(
+      { folders },
+      {
+        headers: {
+          "Cache-Control": "private, max-age=300",
+        },
+      }
+    );
   } catch (err) {
     console.error("[/api/drive/folders]", err);
     return NextResponse.json(

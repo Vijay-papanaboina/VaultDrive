@@ -15,6 +15,8 @@ interface MetaGridProps {
   isLoading: boolean; // Stage 1 generic loading (isListLoading)
   error: string | null;
   relativePath: string;
+  /** If provided, overrides relativePath on a per-file basis (used in recursive/search views) */
+  getRelativePath?: (file: ProgressiveMetaFile) => string;
 }
 
 /** Detect age decryption failure (wrong passphrase), not format errors */
@@ -46,7 +48,7 @@ function SkeletonCard() {
   );
 }
 
-export function MetaGrid({ files, isLoading, error, relativePath }: MetaGridProps) {
+export function MetaGrid({ files, isLoading, error, relativePath, getRelativePath }: MetaGridProps) {
   const [selected, setSelected] = useState<DecryptedMeta | null>(null);
   const { clearPassphrase } = useCrypto();
   const { isSelectionMode, isFileSelected, toggleFileSelection } = useSelection();
@@ -54,10 +56,11 @@ export function MetaGrid({ files, isLoading, error, relativePath }: MetaGridProp
   const handleCardClick = (file: ProgressiveMetaFile) => {
     const fileId = file.driveFile.name.replace(".meta", "");
     if (isSelectionMode) {
+      const resolvedPath = getRelativePath ? getRelativePath(file) : relativePath;
       toggleFileSelection({
         id: fileId,
         name: file.originalFileName,
-        relativePath,
+        relativePath: resolvedPath,
       });
     } else {
       if (file.decrypted && file.details && !file.decryptError) {

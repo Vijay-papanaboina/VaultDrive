@@ -8,6 +8,7 @@ The Encrypted GDrive project uses the Next.js App Router. The backend APIs are d
 - `/app/page.tsx`: The landing page which handles initial authentication (Google OAuth login via Better Auth) and redirects logged-in users to `/drive`.
 - `/app/drive/page.tsx`: The root Drive interface, showing the top-level folders in the user's Google Drive via `FolderList`.
 - `/app/drive/[folderId]/page.tsx`: The folder browser page that mounts `FolderView` to fetch, decrypt, and display `.meta` items in a specific directory.
+- `/app/drive/[folderId]/search/page.tsx`: Recursive search page that mounts `SearchView` to recursively fetch, decrypt, and display all files under a selected folder and its subdirectories.
 
 ## API Routes (Google Drive Proxy)
 
@@ -42,6 +43,12 @@ The UI is broken down into specific interactive client components ensuring optim
 4. `GlobalSearchModal`: 
    - Triggered globally, using `Fuse.js` to execute fuzzy matching over the `React Query` cache of decrypted files.
    - Features a clean custom scrollbar UI and keyboard navigation.
+
+5. `SearchView`:
+   - Mounts on `/drive/[folderId]/search`.
+   - Uses `useRecursiveMetaFiles` to crawl subfolders using a client-side Breadth-First Search (BFS) algorithm.
+   - Aggregates all `.meta` files, runs decryption in parallel using Web Workers, and presents them in a single recursive list.
+   - Supports relative path construction, local searching, sorting, and batch file metadata exporting.
 
 ## Application Hierarchy
 

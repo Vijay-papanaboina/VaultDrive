@@ -39,7 +39,7 @@ export function DriveHeader() {
     {
       id: "rclone",
       label: "Copyable Rclone Command",
-      value: `rclone copy "${rcloneRemote}" ./decrypted-files --files-from files.txt`,
+      value: `rclone copy "${rcloneRemote}" ./decrypted-files -P --files-from files.txt`,
     },
     {
       id: "flatten",

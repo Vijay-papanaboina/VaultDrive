@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCrypto } from "@/hooks/use-crypto";
 import type { ProgressiveMetaFile, DriveMetaFile, MetaDetails } from "@/types";
@@ -11,9 +11,11 @@ interface UseMetaFilesResult {
   isDecrypting: boolean;    // Stage 2: decrypting files in batches
   error: string | null;     // top-level error (list fetch failed etc.)
   refetch: () => void;
+  cancelDecryption: () => void;
 }
 
 const DOWNLOAD_CONCURRENCY = 20;
+const DECRYPTION_STOPPED_ERROR = "Decryption stopped";
 
 async function fetchMetaList(folderId: string): Promise<DriveMetaFile[]> {
   const res = await fetch(`/api/drive/meta?folderId=${folderId}`);
@@ -50,13 +52,49 @@ export function useMetaFiles(
   const [isDecrypting, setIsDecrypting] = useState(false);
   const [decryptError, setDecryptError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const cancelRequestedRef = useRef(false);
+  const activeFetchesRef = useRef<Set<AbortController>>(new Set());
 
   const refetch = useCallback(() => {
+    cancelRequestedRef.current = false;
     setDecryptError(null);
     queryClient.removeQueries({ queryKey: ["meta-list", folderId] });
     queryClient.removeQueries({ queryKey: ["decrypted-folder", folderId] });
     setRefreshKey((k) => k + 1);
   }, [queryClient, folderId]);
+
+  const cancelDecryption = useCallback(() => {
+    cancelRequestedRef.current = true;
+    activeFetchesRef.current.forEach((controller) => controller.abort());
+    activeFetchesRef.current.clear();
+    setIsDecrypting(false);
+
+    const decryptedQueryKey = ["decrypted-folder", folderId];
+
+    setFiles((prev) =>
+      prev.map((file) =>
+        file.decrypted
+          ? file
+          : {
+              ...file,
+              decrypted: true,
+              decryptError: DECRYPTION_STOPPED_ERROR,
+            }
+      )
+    );
+
+    queryClient.setQueryData<ProgressiveMetaFile[]>(decryptedQueryKey, (prev) =>
+      prev?.map((file) =>
+        file.decrypted
+          ? file
+          : {
+              ...file,
+              decrypted: true,
+              decryptError: DECRYPTION_STOPPED_ERROR,
+            }
+      )
+    );
+  }, [folderId, queryClient]);
 
   useEffect(() => {
     if (!folderId || !hasPassphrase || !driveFiles) return;
@@ -65,6 +103,8 @@ export function useMetaFiles(
     if (!passphrase) return;
 
     let cancelled = false;
+    cancelRequestedRef.current = false;
+    const activeFetches = activeFetchesRef.current;
     const decryptedQueryKey = ["decrypted-folder", folderId];
     // Sort files to decrypt by createdTime descending (newest first)
     const filesToDecrypt = [...driveFiles].sort((a, b) => {
@@ -91,7 +131,11 @@ export function useMetaFiles(
       // Map initial files to decrypt
       const currentFiles = queryClient.getQueryData<ProgressiveMetaFile[]>(decryptedQueryKey) || [];
 
-      while (nextJobIndex < filesToDecrypt.length && !cancelled) {
+      while (
+        nextJobIndex < filesToDecrypt.length &&
+        !cancelled &&
+        !cancelRequestedRef.current
+      ) {
         const index = nextJobIndex++;
         if (index >= filesToDecrypt.length) break;
 
@@ -101,11 +145,20 @@ export function useMetaFiles(
 
         try {
           // Fetch bytes on main thread (highly non-blocking I/O)
-          const res = await fetch(`/api/drive/meta/${file.id}`);
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const bytes = new Uint8Array(await res.arrayBuffer());
+          const controller = new AbortController();
+          activeFetches.add(controller);
+          let bytes: Uint8Array;
+          try {
+            const res = await fetch(`/api/drive/meta/${file.id}`, {
+              signal: controller.signal,
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            bytes = new Uint8Array(await res.arrayBuffer());
+          } finally {
+            activeFetches.delete(controller);
+          }
 
-          if (cancelled) break;
+          if (cancelled || cancelRequestedRef.current) break;
 
           // Delegate CPU heavy decryption to worker and await result
           const worker = workers[index % workerCount];
@@ -161,7 +214,7 @@ export function useMetaFiles(
             }, [bytes.buffer]); // Transfer buffer (zero-copy transfer)
           });
 
-          if (!cancelled) {
+          if (!cancelled && !cancelRequestedRef.current) {
             // Update React state purely
             setFiles((prev) => {
               const updated = [...prev];
@@ -212,7 +265,7 @@ export function useMetaFiles(
             });
           }
         } catch (err) {
-          if (!cancelled) {
+          if (!cancelled && !cancelRequestedRef.current) {
             const msg = err instanceof Error ? err.message : "Decryption failed";
 
             // Update React state purely
@@ -279,13 +332,15 @@ export function useMetaFiles(
       const pool = Array.from({ length: DOWNLOAD_CONCURRENCY }).map(() => downloader());
       await Promise.all(pool);
 
-      if (!cancelled) setIsDecrypting(false);
+      if (!cancelled && !cancelRequestedRef.current) setIsDecrypting(false);
     }
 
     processDecryption();
 
     return () => {
       cancelled = true;
+      activeFetches.forEach((controller) => controller.abort());
+      activeFetches.clear();
       workers.forEach((w) => w.terminate());
     };
   }, [
@@ -309,5 +364,6 @@ export function useMetaFiles(
     isDecrypting: hasPassphrase ? isDecrypting : false,
     error: errorMsg,
     refetch,
+    cancelDecryption,
   };
 }

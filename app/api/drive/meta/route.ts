@@ -25,7 +25,14 @@ export async function GET(request: NextRequest) {
     }
 
     const files = await listMetaFiles(tokenResult.accessToken, folderId);
-    return NextResponse.json({ files });
+    return NextResponse.json(
+      { files },
+      {
+        headers: {
+          "Cache-Control": "private, max-age=300",
+        },
+      }
+    );
   } catch (err) {
     console.error("[/api/drive/meta]", err);
     return NextResponse.json(

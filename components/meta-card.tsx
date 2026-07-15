@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, memo } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -34,7 +34,8 @@ function formatDate(iso: string): string {
   }
 }
 
-export function MetaCard({ meta, onClick, isSelectionMode = false, isSelected = false }: MetaCardProps) {
+export const MetaCard = memo(
+  function MetaCard({ meta, onClick, isSelectionMode = false, isSelected = false }: MetaCardProps) {
   const { driveFile, originalFileName, decrypted, details, thumbnailBytes, thumbnailMimeType, decryptError } = meta;
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
 
@@ -109,6 +110,7 @@ export function MetaCard({ meta, onClick, isSelectionMode = false, isSelected = 
           <img
             src={thumbnailUrl}
             alt={`Thumbnail for ${originalFileName}`}
+            loading="lazy"
             className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
           />
         ) : (
@@ -207,4 +209,10 @@ export function MetaCard({ meta, onClick, isSelectionMode = false, isSelected = 
       </div>
     </Card>
   );
-}
+}, (prevProps, nextProps) => {
+  return (
+    prevProps.isSelectionMode === nextProps.isSelectionMode &&
+    prevProps.isSelected === nextProps.isSelected &&
+    prevProps.meta === nextProps.meta
+  );
+});

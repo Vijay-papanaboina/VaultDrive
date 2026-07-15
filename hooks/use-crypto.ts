@@ -36,6 +36,10 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
 
   const queryClient = useQueryClient();
 
+  function clearDecryptedFileCache() {
+    queryClient.removeQueries({ queryKey: ["decrypted-folder"] });
+  }
+
   function getPassphrase() {
     return identityRef.current;
   }
@@ -47,14 +51,14 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
     setPassphraseError(null);
     setDismissedPassphraseError(false);
     setIsGateOpen(false);
-    queryClient.clear();
+    clearDecryptedFileCache();
   }
 
   function clearPassphrase(errorMsg?: string) {
     identityRef.current = null;
     setHasPassphrase(false);
     setIsGateOpen(false);
-    queryClient.clear();
+    clearDecryptedFileCache();
     if (typeof errorMsg === "string") {
       setPassphraseError(errorMsg);
     } else {
