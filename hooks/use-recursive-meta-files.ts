@@ -3,7 +3,18 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCrypto } from "@/hooks/use-crypto";
-import type { ProgressiveMetaFile, DriveMetaFile, DriveFolder, MetaDetails } from "@/types";
+import { fetchMetaList, fetchSubfolders } from "@/lib/drive-client";
+import {
+  createPendingMetaFile,
+  createResolvedMetaFile,
+  decryptWithWorker,
+  DOWNLOAD_CONCURRENCY,
+  markUndecryptedFilesStopped,
+  replaceMetaFile,
+  sortDriveFilesNewestFirst,
+  upsertMetaFile,
+} from "@/lib/meta-decryption";
+import type { ProgressiveMetaFile, DriveMetaFile } from "@/types";
 
 interface UseRecursiveMetaFilesResult {
   files: ProgressiveMetaFile[];
@@ -15,24 +26,6 @@ interface UseRecursiveMetaFilesResult {
   cancelDecryption: () => void;
   /** Maps folderId -> full relative path (e.g. "DB-Backup/folder1/sub") */
   folderIdToPath: Record<string, string>;
-}
-
-const DOWNLOAD_CONCURRENCY = 20;
-const DECRYPTION_STOPPED_ERROR = "Decryption stopped";
-
-async function fetchSubfolders(parentId: string): Promise<DriveFolder[]> {
-  const params = new URLSearchParams({ parentId });
-  const res = await fetch(`/api/drive/folders?${params.toString()}`);
-  if (!res.ok) throw new Error("Failed to fetch folders");
-  const data = await res.json();
-  return data.folders as DriveFolder[];
-}
-
-async function fetchMetaList(folderId: string): Promise<DriveMetaFile[]> {
-  const res = await fetch(`/api/drive/meta?folderId=${folderId}`);
-  if (!res.ok) throw new Error(`Failed to list meta files: HTTP ${res.status}`);
-  const data = await res.json();
-  return data.files as DriveMetaFile[];
 }
 
 export function useRecursiveMetaFiles(
@@ -142,15 +135,7 @@ export function useRecursiveMetaFiles(
     activeFetchesRef.current.clear();
     setIsDecrypting(false);
 
-    const updated = latestFilesRef.current.map((file) =>
-      file.decrypted
-        ? file
-        : {
-            ...file,
-            decrypted: true,
-            decryptError: DECRYPTION_STOPPED_ERROR,
-          }
-    );
+    const updated = markUndecryptedFilesStopped(latestFilesRef.current);
     latestFilesRef.current = updated;
     setFiles(updated);
 
@@ -190,16 +175,7 @@ export function useRecursiveMetaFiles(
     cancelRequestedRef.current = false;
     const activeFetches = activeFetchesRef.current;
 
-    // Sort newest first, same as the original hook
-    const filesToDecrypt = [...driveFiles].sort((a, b) => {
-      const dateA = a.createdTime
-        ? new Date(a.createdTime).getTime()
-        : (a.modifiedTime ? new Date(a.modifiedTime).getTime() : 0);
-      const dateB = b.createdTime
-        ? new Date(b.createdTime).getTime()
-        : (b.modifiedTime ? new Date(b.modifiedTime).getTime() : 0);
-      return dateB - dateA;
-    });
+    const filesToDecrypt = sortDriveFilesNewestFirst(driveFiles);
 
     // Worker pool: same sizing logic as use-meta-files.ts
     const workerCount = Math.min(navigator.hardwareConcurrency || 2, 10);
@@ -258,124 +234,34 @@ export function useRecursiveMetaFiles(
           if (cancelled || cancelRequestedRef.current) break;
 
           const worker = workers[index % workerCount];
-          const decrypted = await new Promise<{
-            success: boolean;
-            result?: {
-              details: MetaDetails;
-              thumbnailBytes?: Uint8Array | null;
-              thumbnailMimeType?: string | null;
-            };
-            error?: string;
-          }>((resolve) => {
-            let resolved = false;
-
-            const cleanup = () => {
-              worker.removeEventListener("message", handleMessage);
-              worker.removeEventListener("error", handleError);
-              clearTimeout(timeoutId);
-            };
-
-            const handleMessage = (e: MessageEvent) => {
-              if (e.data.fileId === file.id) {
-                cleanup();
-                if (!resolved) { resolved = true; resolve(e.data); }
-              }
-            };
-
-            const handleError = (e: ErrorEvent) => {
-              cleanup();
-              if (!resolved) {
-                resolved = true;
-                resolve({ success: false, error: e.message || "Worker error" });
-              }
-            };
-
-            const timeoutId = setTimeout(() => {
-              cleanup();
-              if (!resolved) {
-                resolved = true;
-                resolve({ success: false, error: "Decryption timeout" });
-              }
-            }, 30000);
-
-            worker.addEventListener("message", handleMessage);
-            worker.addEventListener("error", handleError);
-            worker.postMessage(
-              { fileId: file.id, identity: passphrase!, encryptedData: bytes },
-              [bytes.buffer] // zero-copy transfer
-            );
-          });
+          const decrypted = await decryptWithWorker(
+            worker,
+            file.id,
+            passphrase!,
+            bytes
+          );
 
           if (!cancelled && !cancelRequestedRef.current) {
+            const nextFile = createResolvedMetaFile(file, decrypted);
             // Update React state for progressive card reveal — identical to original hook
-            setFiles((prev) => {
-              const updated = [...prev];
-              const pos = updated.findIndex((f) => f.driveFile.id === file.id);
-              if (pos !== -1) {
-                if (decrypted.success && decrypted.result) {
-                  updated[pos] = {
-                    ...updated[pos],
-                    decrypted: true,
-                    details: decrypted.result.details,
-                    thumbnailBytes: decrypted.result.thumbnailBytes,
-                    thumbnailMimeType: decrypted.result.thumbnailMimeType,
-                  };
-                } else {
-                  updated[pos] = {
-                    ...updated[pos],
-                    decrypted: true,
-                    decryptError: decrypted.error || "Decryption failed",
-                  };
-                }
-              }
-              return updated;
-            });
+            setFiles((prev) => replaceMetaFile(prev, file.id, nextFile));
 
             // Also write into per-folder RQ cache so normal folder view benefits
             queryClient.setQueryData<ProgressiveMetaFile[]>(decryptedQueryKey, (prev) => {
-              const list = prev ? [...prev] : [];
-              const pos = list.findIndex((f) => f.driveFile.id === file.id);
-              const entry: ProgressiveMetaFile = decrypted.success && decrypted.result
-                ? {
-                    driveFile: file,
-                    originalFileName: file.name.replace(/\.meta$/i, ""),
-                    decrypted: true,
-                    details: decrypted.result.details,
-                    thumbnailBytes: decrypted.result.thumbnailBytes ?? null,
-                    thumbnailMimeType: decrypted.result.thumbnailMimeType ?? null,
-                  }
-                : {
-                    driveFile: file,
-                    originalFileName: file.name.replace(/\.meta$/i, ""),
-                    decrypted: true,
-                    decryptError: decrypted.error || "Decryption failed",
-                  };
-              if (pos !== -1) { list[pos] = entry; } else { list.push(entry); }
-              return list;
+              return upsertMetaFile(prev ? prev : [], file.id, nextFile);
             });
           }
         } catch (err) {
           if (!cancelled && !cancelRequestedRef.current) {
             const msg = err instanceof Error ? err.message : "Decryption failed";
-            setFiles((prev) => {
-              const updated = [...prev];
-              const pos = updated.findIndex((f) => f.driveFile.id === file.id);
-              if (pos !== -1) {
-                updated[pos] = { ...updated[pos], decrypted: true, decryptError: msg };
-              }
-              return updated;
-            });
+            const nextFile: ProgressiveMetaFile = {
+              ...createPendingMetaFile(file),
+              decrypted: true,
+              decryptError: msg,
+            };
+            setFiles((prev) => replaceMetaFile(prev, file.id, nextFile));
             queryClient.setQueryData<ProgressiveMetaFile[]>(["decrypted-folder", folderId], (prev) => {
-              const list = prev ? [...prev] : [];
-              const pos = list.findIndex((f) => f.driveFile.id === file.id);
-              const entry: ProgressiveMetaFile = {
-                driveFile: file,
-                originalFileName: file.name.replace(/\.meta$/i, ""),
-                decrypted: true,
-                decryptError: msg,
-              };
-              if (pos !== -1) { list[pos] = entry; } else { list.push(entry); }
-              return list;
+              return upsertMetaFile(prev ? prev : [], file.id, nextFile);
             });
           }
         }
@@ -394,11 +280,7 @@ export function useRecursiveMetaFiles(
       const initialList: ProgressiveMetaFile[] = filesToDecrypt.map((f) => {
         const cached = queryClient.getQueryData<ProgressiveMetaFile[]>(["decrypted-folder", f.folderId]) || [];
         const match = cached.find((c) => c.driveFile.id === f.id);
-        return match ?? {
-          driveFile: f,
-          originalFileName: f.name.replace(/\.meta$/i, ""),
-          decrypted: false,
-        };
+        return match ?? createPendingMetaFile(f);
       });
 
       latestFilesRef.current = initialList;

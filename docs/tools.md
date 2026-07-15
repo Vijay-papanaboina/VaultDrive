@@ -16,7 +16,7 @@ To download files, VaultDrive provides a bulk-download helper pipeline:
 3. **Download List**: Click **Download List**. This downloads a local file named `files.txt` containing a line-separated list of relative folder paths and Google Drive file IDs.
 4. **Fetch Using Rclone**: An interactive dialog will display the rclone commands to copy the encrypted files to your machine using the downloaded `files.txt`:
    ```bash
-   rclone copy "mygdrive:" ./decrypted-files --files-from files.txt
+   rclone copy "mygdrive:" ./encrypted-files --files-from files.txt
    ```
 5. **Flatten Directory (Optional)**: If you want to pull files out of their subfolders into the root destination folder:
    ```bash
@@ -66,7 +66,7 @@ node tools/vaultdrive-cli.mjs --keys
 #### Usage Example
 ```bash
 # Decrypt an entire directory of downloaded files
-node tools/decrypt-file.mjs -d ./decrypted-files -o ./my-restored-files
+node tools/decrypt-file.mjs -d ./encrypted-files -o ./my-restored-files
 ```
 
 ---

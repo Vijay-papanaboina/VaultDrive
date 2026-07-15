@@ -20,6 +20,16 @@ Because browser clients cannot safely store Google Drive OAuth tokens indefinite
 - `/api/drive/meta/[fileId]/route.ts`: Fetches the raw encrypted `.meta` bytes for a specific file, returning `application/octet-stream`.
 - `/api/drive/path/route.ts`: Resolves folder path lineage by walking up the parent tree in Google Drive, returning breadcrumb data.
 
+## Shared Client Utilities
+
+Several client-side helpers are now shared across both the normal folder view and recursive search view:
+
+- `lib/drive-client.ts`: Shared `fetchBreadcrumbs`, `fetchSubfolders`, and `fetchMetaList` helpers used by page hooks/components.
+- `lib/drive-path.ts`: Shared breadcrumb-to-relative-path formatter.
+- `lib/meta-decryption.ts`: Shared worker/decrypt/cache-update helpers used by both decryption hooks.
+- `hooks/use-drive-file-browser-state.ts`: Shared inline search and sort state for the file browser shell.
+- `hooks/use-decryption-error-prompt.ts`: Shared modal-open / dismiss / stop / re-enter behavior for decryption failures.
+
 ## Key React Components
 
 The UI is broken down into specific interactive client components ensuring optimal performance and scoped reactivity.
@@ -34,21 +44,39 @@ The UI is broken down into specific interactive client components ensuring optim
    - Contains the global search trigger, breadcrumb navigation, and user session menu.
    - Includes a "Re-enter Key" button allowing users to update their memory passphrase seamlessly.
 
-3. `FolderView`: 
-   - The primary file grid.
-   - Integrates `useMetaFiles` to request `.meta` files from the API, decrypt them via `age-encryption`, and display them.
-   - Includes local folder search with space-insensitive matching.
-   - Uses a themed `DropdownMenu` for file sorting.
+3. `DriveFileBrowser`:
+   - Shared browser shell used by both the normal folder page and recursive search page.
+   - Owns the inline search box, sort controls, refresh button, empty states, and `MetaGrid` rendering.
+   - Delegates page-specific data fetching and relative-path logic to the parent page component.
 
 4. `GlobalSearchModal`: 
    - Triggered globally, using `Fuse.js` to execute fuzzy matching over the `React Query` cache of decrypted files.
    - Features a clean custom scrollbar UI and keyboard navigation.
 
-5. `SearchView`:
+5. `FolderView`:
+   - Mounts on `/drive/[folderId]`.
+   - Fetches subfolders and breadcrumbs for the current folder.
+   - Uses `useMetaFiles` for `.meta` list fetching and decryption, then passes the results into `DriveFileBrowser`.
+
+6. `SearchView`:
    - Mounts on `/drive/[folderId]/search`.
-   - Uses `useRecursiveMetaFiles` to crawl subfolders using a client-side Breadth-First Search (BFS) algorithm.
-   - Aggregates all `.meta` files, runs decryption in parallel using Web Workers, and presents them in a single recursive list.
-   - Supports relative path construction, local searching, sorting, and batch file metadata exporting.
+   - Fetches breadcrumbs for the root folder.
+   - Uses `useRecursiveMetaFiles` to crawl subfolders using a client-side Breadth-First Search (BFS) algorithm, aggregate all `.meta` files, then pass the result into `DriveFileBrowser`.
+
+7. `DecryptionErrorDialog`:
+   - Shared modal used by both `FolderView` and `SearchView`.
+   - Provides `Cancel`, `Stop`, and `Re-enter` actions when decryption failures suggest a wrong passphrase.
+
+8. `MetaGrid`:
+   - Shared grid surface for both page modes.
+   - Renders `MetaCard`, empty states, error states, and the detail modal.
+
+## Data Hooks
+
+- `useMetaFiles`:
+  Fetches one folder's `.meta` file list, decrypts entries with a worker pool, progressively updates cards, and supports cancellation.
+- `useRecursiveMetaFiles`:
+  Crawls the folder tree, aggregates many `.meta` file lists, reuses the same worker/decrypt pipeline, and stores `folderId -> path` for per-card relative paths.
 
 ## Application Hierarchy
 
@@ -67,22 +95,27 @@ graph TD
     PassphraseGate -->|On Success| GatedContent
     GatedContent --> RootPage[app/drive/page.tsx]
     GatedContent --> FolderPage[app/drive/[folderId]/page.tsx]
+    GatedContent --> SearchPage[app/drive/[folderId]/search/page.tsx]
     
     RootPage --> FolderList
     FolderPage --> FolderView
+    SearchPage --> SearchView
     
     DriveHeader --> Breadcrumbs
     DriveHeader --> GlobalSearchModal
     DriveHeader --> UserMenu
     
-    FolderView --> MetaGrid
-    FolderView --> LocalSearch
-    FolderView --> SortDropdown
+    FolderView --> DriveFileBrowser
+    SearchView --> DriveFileBrowser
+    FolderView --> DecryptionErrorDialog
+    SearchView --> DecryptionErrorDialog
     
+    DriveFileBrowser --> MetaGrid
     MetaGrid --> MetaCard
     MetaCard --> MetaDetailModal
     
     NextAPI[Next.js API Routes] -.->|Manages Session| AuthProvider
     NextAPI -.->|Fetches Blobs| GoogleDrive[Google Drive API]
     FolderView -.->|Requests Data| NextAPI
+    SearchView -.->|Requests Data| NextAPI
 ```

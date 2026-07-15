@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { MetaCard } from "@/components/meta-card";
 import { MetaDetailModal } from "@/components/meta-detail-modal";
 import { useSelection } from "@/components/selection-provider";
+import { breadcrumbsToRelativePath } from "@/lib/drive-path";
 import type { ProgressiveMetaFile, BreadcrumbItem, DecryptedMeta } from "@/types";
 import { Search, FileX, Archive } from "lucide-react";
 
@@ -52,10 +53,7 @@ export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
       // Resolve path from breadcrumbs cache if present
       const breadcrumbs =
         queryClient.getQueryData<BreadcrumbItem[]>(["breadcrumbs", folderId]) || [];
-      const relativePath = breadcrumbs
-        .map((b) => b.name)
-        .filter((name) => name.toLowerCase() !== "my drive")
-        .join("/");
+      const relativePath = breadcrumbsToRelativePath(breadcrumbs);
 
       data.forEach((file) => {
         // Only include decrypted files without errors

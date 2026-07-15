@@ -9,10 +9,11 @@ All sensitive cryptographic operations—including passphrase validation and dat
 - **Google Drive Storage Backend**: Authenticate via Google OAuth to use your existing Google Drive as the storage layer for your encrypted vault.
 - **End-to-End Encryption**: Files and their metadata (stored as `.meta` zip archives in Google Drive) are encrypted using `age-encryption`. The passphrase you provide never leaves your browser; it derives an in-memory X25519 identity key.
 - **Passphrase Gating**: A secure modal blocks access until a valid key is provided, preventing unauthorized local access while allowing seamless key re-entry without breaking session state.
-- **Global & Local Search**: 
+- **Global, Local, and Recursive Search**:
   - **In-Folder Search**: Real-time filtering within the current directory with space-insensitive matching.
+  - **Recursive Folder Search**: Open any folder in recursive search mode to crawl its subfolders, aggregate `.meta` files, and browse the entire subtree in one view.
   - **Global Fuzzy Search**: Instantly find any decrypted file across your entire drive structure via a global modal, powered by `Fuse.js` and React Query caching.
-- **Performance Optimized**: Heavy cryptographic decryption is offloaded to a dynamic browser Web Worker pool, ensuring smooth UI interactions.
+- **Performance Optimized**: Heavy cryptographic decryption is offloaded to a dynamic browser Web Worker pool, with a shared client-side decryption pipeline used by both normal and recursive views.
 - **Rclone Selection & Export**: Select specific files to export an ID list and fetch your raw encrypted data from Google Drive using Rclone command-line utilities.
 - **Modern UI/UX**: Built with Tailwind CSS v4 and Base UI, featuring custom scrollbars, micro-animations, and a highly polished dark mode.
 
@@ -31,8 +32,8 @@ All sensitive cryptographic operations—including passphrase validation and dat
 
 For an in-depth look at how the system maintains zero-knowledge privacy while interacting with Google Drive:
 
-1. [Architecture & Decryption Flow](./docs/architecture.md) - Learn about the Google Drive proxy layer, client-side decryption, and memory management.
-2. [Routes & Components](./docs/routes.md) - Understand the Next.js API endpoints and key UI components.
+1. [Architecture & Decryption Flow](./docs/architecture.md) - Learn about the Google Drive proxy layer, client-side decryption pipeline, shared browser shell, and recursive search flow.
+2. [Routes & Components](./docs/routes.md) - Understand the Next.js API endpoints, shared view components, and page-specific wiring.
 3. [CLI Tools & Selection Export](./docs/tools.md) - Details on Rclone bulk downloading, folder-flattening, and the local Node.js decryption/packaging script tools.
 
 ## Getting Started
