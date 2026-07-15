@@ -1,36 +1,64 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Encrypted GDrive
+
+A secure, client-side encryption frontend for Google Drive. This project provides a Google Drive-like web interface where your files are stored on Google Drive, but their metadata and contents are fully end-to-end encrypted using `age-encryption`.
+
+All sensitive cryptographic operations—including passphrase validation and data decryption—occur strictly client-side in the browser. The Next.js backend serves merely as a secure proxy to fetch data from the Google Drive API, ensuring the server never sees your unencrypted data or your encryption key.
+
+## Core Features
+
+- **Google Drive Storage Backend**: Authenticate via Google OAuth to use your existing Google Drive as the storage layer for your encrypted vault.
+- **End-to-End Encryption**: Files and their metadata (stored as `.meta` zip archives in Google Drive) are encrypted using `age-encryption`. The passphrase you provide never leaves your browser; it derives an in-memory X25519 identity key.
+- **Passphrase Gating**: A secure modal blocks access until a valid key is provided, preventing unauthorized local access while allowing seamless key re-entry without breaking session state.
+- **Global & Local Search**: 
+  - **In-Folder Search**: Real-time filtering within the current directory with space-insensitive matching.
+  - **Global Fuzzy Search**: Instantly find any decrypted file across your entire drive structure via a global modal, powered by `Fuse.js` and React Query caching.
+- **Performance Optimized**: Heavy cryptographic decryption is offloaded to a dynamic browser Web Worker pool, ensuring smooth UI interactions.
+- **Rclone Selection & Export**: Select specific files to export an ID list and fetch your raw encrypted data from Google Drive using Rclone command-line utilities.
+- **Modern UI/UX**: Built with Tailwind CSS v4 and Base UI, featuring custom scrollbars, micro-animations, and a highly polished dark mode.
+
+## Tech Stack
+
+- **Framework**: [Next.js 16](https://nextjs.org/) (App Router)
+- **UI Library**: [React 19](https://react.dev/)
+- **Styling**: [Tailwind CSS v4](https://tailwindcss.com/)
+- **Components**: [Base UI](https://base-ui.com/) & custom themed components
+- **Authentication**: [Better Auth](https://better-auth.com/) (using Google OAuth & Better SQLite3 for local session persistence)
+- **Storage**: [Google Drive API (v3)](https://developers.google.com/drive/api/v3/reference)
+- **Encryption**: [`age-encryption`](https://github.com/FiloSottile/age) & [`fflate`](https://github.com/101arrowz/fflate)
+- **Search**: [`Fuse.js`](https://fusejs.io/)
+
+## Documentation
+
+For an in-depth look at how the system maintains zero-knowledge privacy while interacting with Google Drive:
+
+1. [Architecture & Decryption Flow](./docs/architecture.md) - Learn about the Google Drive proxy layer, client-side decryption, and memory management.
+2. [Routes & Components](./docs/routes.md) - Understand the Next.js API endpoints and key UI components.
+3. [CLI Tools & Selection Export](./docs/tools.md) - Details on Rclone bulk downloading, folder-flattening, and the local Node.js decryption/packaging script tools.
 
 ## Getting Started
 
-First, run the development server:
+1. **Install Dependencies**:
+   ```bash
+   npm install
+   # or
+   pnpm install
+   ```
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+2. **Setup Environment**:
+   Create a `.env.local` file with the following variables:
+   ```env
+   BETTER_AUTH_URL=http://localhost:3000
+   BETTER_AUTH_SECRET=your_secret_here
+   AUTH_GOOGLE_ID=your_google_oauth_client_id
+   AUTH_GOOGLE_SECRET=your_google_oauth_client_secret
+   ```
+   Ensure your Google OAuth application has the `https://www.googleapis.com/auth/drive.readonly` scope enabled.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+3. **Run the Development Server**:
+   ```bash
+   npm run dev
+   # or
+   pnpm dev
+   ```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+4. Open [http://localhost:3000](http://localhost:3000) to login via Google and access your encrypted drive.
