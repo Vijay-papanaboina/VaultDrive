@@ -1,6 +1,6 @@
 {
-  "name": "encrypted-gdrive",
-  "version": "0.1.0",
+  "name": "vaultdrive",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
