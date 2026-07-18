@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { MetaCard } from "@/components/meta-card";
 import { MetaDetailModal } from "@/components/meta-detail-modal";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { useCrypto } from "@/hooks/use-crypto";
 import type { ProgressiveMetaFile, DecryptedMeta } from "@/types";
-import { FileX, KeyRound, RotateCcw } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileX, KeyRound, RotateCcw } from "lucide-react";
 import { useSelection } from "@/components/selection-provider";
 
 interface MetaGridProps {
@@ -19,15 +19,7 @@ interface MetaGridProps {
   getRelativePath?: (file: ProgressiveMetaFile) => string;
 }
 
-const INITIAL_VISIBLE_ROWS = 3;
-const VISIBLE_ROW_STEP = 3;
-
-function getColumnCount(viewportWidth: number) {
-  if (viewportWidth >= 1280) return 4;
-  if (viewportWidth >= 1024) return 3;
-  if (viewportWidth >= 640) return 2;
-  return 1;
-}
+const PAGE_SIZE = 32;
 
 /** Detect age decryption failure (wrong passphrase), not format errors */
 function isPassphraseError(msg: string): boolean {
@@ -58,68 +50,112 @@ function SkeletonCard() {
   );
 }
 
+interface PaginationControlsProps {
+  page: number;
+  totalPages: number;
+  startIndex: number;
+  endIndex: number;
+  totalFiles: number;
+  onChange: (p: number) => void;
+}
+
+function PaginationControls({ page, totalPages, startIndex, endIndex, totalFiles, onChange }: PaginationControlsProps) {
+  if (totalPages <= 1) return null;
+
+  const pageNumbers: (number | "…")[] = [];
+  if (totalPages <= 7) {
+    for (let i = 1; i <= totalPages; i++) pageNumbers.push(i);
+  } else if (page <= 4) {
+    pageNumbers.push(1, 2, 3, 4, 5, "…", totalPages);
+  } else if (page >= totalPages - 3) {
+    pageNumbers.push(1, "…", totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages);
+  } else {
+    pageNumbers.push(1, "…", page - 1, page, page + 1, "…", totalPages);
+  }
+
+  const btnBase = "flex h-7 min-w-7 items-center justify-center rounded-lg px-2 text-xs font-medium transition-colors";
+
+  return (
+    <div className="flex items-center justify-between border-t border-white/8 pt-4">
+      <p className="text-xs text-muted-foreground">
+        {startIndex + 1}–{endIndex} of {totalFiles}
+      </p>
+      <div className="flex items-center gap-1">
+        <button
+          onClick={() => onChange(page - 1)}
+          disabled={page === 1}
+          className={`${btnBase} border border-white/10 bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground disabled:pointer-events-none disabled:opacity-30`}
+          aria-label="Previous page"
+        >
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </button>
+
+        {pageNumbers.map((p, i) =>
+          p === "…" ? (
+            <span key={`ellipsis-${i}`} className="flex h-7 w-6 items-center justify-center text-xs text-muted-foreground/50">
+              …
+            </span>
+          ) : (
+            <button
+              key={p}
+              onClick={() => onChange(p as number)}
+              className={`${btnBase} ${
+                page === p
+                  ? "bg-violet-600 text-white shadow-lg shadow-violet-600/20"
+                  : "border border-white/10 bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground"
+              }`}
+            >
+              {p}
+            </button>
+          )
+        )}
+
+        <button
+          onClick={() => onChange(page + 1)}
+          disabled={page === totalPages}
+          className={`${btnBase} border border-white/10 bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground disabled:pointer-events-none disabled:opacity-30`}
+          aria-label="Next page"
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function MetaGrid({ files, isLoading, error, relativePath, getRelativePath }: MetaGridProps) {
   const [selected, setSelected] = useState<DecryptedMeta | null>(null);
-  const [viewportWidth, setViewportWidth] = useState(() =>
-    typeof window === "undefined" ? 1280 : window.innerWidth
-  );
+  const [page, setPage] = useState(1);
+  const gridRef = useRef<HTMLDivElement | null>(null);
   const { clearPassphrase } = useCrypto();
   const { isSelectionMode, isFileSelected, toggleFileSelection } = useSelection();
-  const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    function handleResize() {
-      setViewportWidth(window.innerWidth);
-    }
+  // Detect when the file set identity changes (sort/filter/search changes the head IDs or count).
+  // replaceMetaFile keeps IDs/order/length stable during decryption, so this only fires on real set changes.
+  const filesKey = useMemo(() => {
+    const head = files.slice(0, 4).map((f) => f.driveFile.id).join("|");
+    return `${files.length}::${head}`;
+  }, [files]);
 
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
+  // Reset page during render when the file set changes (React's recommended pattern for
+  // adjusting state on prop change — avoids the extra render cycle of useEffect).
+  // See: https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevFilesKey, setPrevFilesKey] = useState(filesKey);
+  if (prevFilesKey !== filesKey) {
+    setPrevFilesKey(filesKey);
+    setPage(1);
+  }
 
-  const columnCount = getColumnCount(viewportWidth);
-  const visibleSetKey = useMemo(() => {
-    const head = files.slice(0, 8).map((file) => file.driveFile.id).join("|");
-    const tail = files.slice(-2).map((file) => file.driveFile.id).join("|");
-    return `${files.length}::${head}::${tail}::${columnCount}`;
-  }, [files, columnCount]);
-  const [visibleState, setVisibleState] = useState({
-    key: "",
-    count: 0,
-  });
-  const initialVisibleCount = Math.max(INITIAL_VISIBLE_ROWS * columnCount, columnCount);
-  const visibleCount =
-    visibleState.key === visibleSetKey ? visibleState.count : initialVisibleCount;
-  const clampedVisibleCount = Math.min(files.length, visibleCount);
-  const visibleFiles = files.slice(0, clampedVisibleCount);
-  const hasMore = clampedVisibleCount < files.length;
+  const totalPages = Math.max(1, Math.ceil(files.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const startIndex = (safePage - 1) * PAGE_SIZE;
+  const endIndex = Math.min(startIndex + PAGE_SIZE, files.length);
+  const pagedFiles = files.slice(startIndex, endIndex);
 
-  useEffect(() => {
-    if (!hasMore || !loadMoreRef.current) return;
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (!entries[0]?.isIntersecting) return;
-
-        setVisibleState((prev) => {
-          const nextBaseCount =
-            prev.key === visibleSetKey ? prev.count : initialVisibleCount;
-          const nextCount = Math.min(
-            files.length,
-            nextBaseCount + VISIBLE_ROW_STEP * columnCount
-          );
-
-          if (nextCount === nextBaseCount) return prev;
-          return { key: visibleSetKey, count: nextCount };
-        });
-      },
-      {
-        rootMargin: "1200px 0px",
-      }
-    );
-
-    observer.observe(loadMoreRef.current);
-    return () => observer.disconnect();
-  }, [columnCount, files.length, hasMore, initialVisibleCount, visibleSetKey]);
+  function handlePageChange(nextPage: number) {
+    setPage(nextPage);
+    gridRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   const handleCardClick = (file: ProgressiveMetaFile) => {
     const fileId = file.driveFile.name.replace(".meta", "");
@@ -168,7 +204,7 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
           </p>
           <p className="text-sm text-muted-foreground">
             {passphraseErr
-              ? "Decryption failed. The passphrase you entered doesn\u0027t match these files."
+              ? "Decryption failed. The passphrase you entered doesn't match these files."
               : error}
           </p>
         </div>
@@ -215,8 +251,8 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
 
   return (
     <>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {visibleFiles.map((meta) => {
+      <div ref={gridRef} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {pagedFiles.map((meta) => {
           const fileId = meta.driveFile.name.replace(".meta", "");
           return (
             <MetaCard
@@ -230,13 +266,14 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
         })}
       </div>
 
-      {hasMore && (
-        <div ref={loadMoreRef} className="flex justify-center py-6">
-          <p className="text-xs text-muted-foreground/60">
-            Showing {clampedVisibleCount} of {files.length} files
-          </p>
-        </div>
-      )}
+      <PaginationControls
+        page={safePage}
+        totalPages={totalPages}
+        startIndex={startIndex}
+        endIndex={endIndex}
+        totalFiles={files.length}
+        onChange={handlePageChange}
+      />
 
       <MetaDetailModal
         meta={selected}

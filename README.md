@@ -15,8 +15,8 @@ All sensitive cryptographic operations—including passphrase validation and dat
   - **Global Fuzzy Search**: Instantly find any decrypted file across your entire drive structure via a global modal, powered by `Fuse.js` and React Query caching.
 - **Performance Optimized**:
   - Heavy cryptographic decryption is offloaded to a dynamic browser Web Worker pool, with a shared client-side decryption pipeline used by both normal and recursive views.
-  - Local search and sort use a dedicated browser worker so large decrypted folders stay responsive during reordering and filtering.
-  - File grids progressively reveal rows instead of mounting every card at once after each search/sort update.
+  - Local search and sort use a dedicated browser worker so large decrypted folders stay responsive during reordering and filtering, with search inputs debounced (350ms) to avoid redundant computations.
+  - File grids utilize a paginated layout (32 items per page) with responsive pagination controls to avoid DOM overload and ensure rapid rendering.
 - **Rclone Selection & Export**: Select specific files to export an ID list and fetch your raw encrypted data from Google Drive using Rclone command-line utilities.
 - **Modern UI/UX**: Built with Tailwind CSS v4 and Base UI, featuring custom scrollbars, micro-animations, and a highly polished dark mode.
 

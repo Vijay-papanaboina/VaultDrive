@@ -40,21 +40,37 @@ export const MetaCard = memo(
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!thumbnailBytes) return;
+    if (!thumbnailBytes) {
+      setThumbnailUrl(null);
+      return;
+    }
 
     const blob = new Blob([thumbnailBytes as unknown as BlobPart], { type: thumbnailMimeType ?? "image/webp" });
     const url = URL.createObjectURL(blob);
-    
-    const handle = requestAnimationFrame(() => {
-      setThumbnailUrl(url);
+
+    // Swap atomically — revoke the old URL at the same time we set the new one,
+    // so thumbnailUrl is never null between transitions (no skeleton flash).
+    setThumbnailUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return url;
     });
 
+    // Cleanup only revokes if this effect re-runs before setState above fires
+    // (e.g. StrictMode double-invoke). Unmount cleanup is handled separately below.
     return () => {
-      cancelAnimationFrame(handle);
       URL.revokeObjectURL(url);
-      setThumbnailUrl(null);
     };
   }, [thumbnailBytes, thumbnailMimeType]);
+
+  // Revoke the active blob URL on unmount only.
+  useEffect(() => {
+    return () => {
+      setThumbnailUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
+    };
+  }, []);
 
   const isClickable = isSelectionMode || (decrypted && !decryptError);
 
@@ -110,7 +126,7 @@ export const MetaCard = memo(
           <img
             src={thumbnailUrl}
             alt={`Thumbnail for ${originalFileName}`}
-            loading="lazy"
+            // loading="eager"
             className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
           />
         ) : (

@@ -69,7 +69,7 @@ The UI is broken down into specific interactive client components ensuring optim
 
 8. `MetaGrid`:
    - Shared grid surface for both page modes.
-   - Renders `MetaCard`, empty states, error states, and the detail modal.
+   - Renders a paginated grid of `MetaCard` elements (32 items per page), empty states, error states, and the detail modal.
 
 ## Data Hooks
 

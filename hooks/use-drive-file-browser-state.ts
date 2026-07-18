@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ProgressiveMetaFile } from "@/types";
 
 interface UseDriveFileBrowserStateOptions {
@@ -19,7 +19,6 @@ function normalize(str: string) {
 export function useDriveFileBrowserState({
   files,
   folderId,
-  deferSortChange = false,
 }: UseDriveFileBrowserStateOptions) {
   const [searchState, setSearchState] = useState({
     folderId,
@@ -28,13 +27,14 @@ export function useDriveFileBrowserState({
   const [sortBy, setSortBy] = useState<SortBy>("created");
   const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
   const searchQuery = searchState.folderId === folderId ? searchState.query : "";
-  const [workerResult, setWorkerResult] = useState<{
-    key: string;
-    orderedIds: string[];
-  }>({
-    key: "",
-    orderedIds: files.map((file) => file.driveFile.id),
-  });
+  // Debounce the query fed to the worker so typing doesn't trigger a compute
+  // roundtrip on every keystroke. The input still shows searchQuery instantly.
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(searchQuery);
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebouncedSearchQuery(searchQuery), 350);
+    return () => window.clearTimeout(id);
+  }, [searchQuery]);
+  const [sortedIds, setSortedIds] = useState<string[]>(() => files.map((file) => file.driveFile.id));
   const workerRef = useRef<Worker | null>(null);
   const requestIdRef = useRef(0);
   const latestAppliedRequestIdRef = useRef(0);
@@ -65,7 +65,13 @@ export function useDriveFileBrowserState({
     const tail = files.slice(-2).map((file) => file.driveFile.id).join("|");
     return `${files.length}::${head}::${tail}`;
   }, [files]);
-  const currentComputeKey = `${filesKey}::${searchQuery}::${sortBy}::${sortOrder}`;
+  const currentComputeKey = `${filesKey}::${debouncedSearchQuery}::${sortBy}::${sortOrder}`;
+
+  const [prevFilesKey, setPrevFilesKey] = useState(filesKey);
+  if (prevFilesKey !== filesKey) {
+    setPrevFilesKey(filesKey);
+    setSortedIds(files.map((file) => file.driveFile.id));
+  }
 
   useEffect(() => {
     const worker = new Worker(
@@ -81,11 +87,9 @@ export function useDriveFileBrowserState({
       if (!requestKey) return;
 
       latestAppliedRequestIdRef.current = requestId;
-      setWorkerResult({
-        key: requestKey,
-        orderedIds: nextOrderedIds,
-      });
       requestKeyByIdRef.current.delete(requestId);
+
+      setSortedIds(nextOrderedIds);
     };
 
     worker.addEventListener("message", handleMessage);
@@ -114,47 +118,35 @@ export function useDriveFileBrowserState({
     workerRef.current.postMessage({
       type: "compute",
       requestId,
-      searchQuery,
+      searchQuery: debouncedSearchQuery,
       sortBy,
       sortOrder,
     });
-  }, [currentComputeKey, indexedFiles, searchQuery, sortBy, sortOrder]);
+  }, [currentComputeKey, debouncedSearchQuery, sortBy, sortOrder]);
 
   const sortedFiles = useMemo(() => {
-    if (workerResult.key !== currentComputeKey) return files;
-
-    return workerResult.orderedIds
+    return sortedIds
       .map((id) => fileById.get(id))
       .filter((file): file is ProgressiveMetaFile => Boolean(file));
-  }, [currentComputeKey, fileById, files, workerResult]);
-
+  }, [sortedIds, fileById]);
   function updateSearchQuery(query: string) {
     setSearchState({ folderId, query });
   }
 
   function updateSort(sortByValue: SortBy, sortOrderValue: SortOrder) {
-    startTransition(() => {
-      setSortBy(sortByValue);
-      setSortOrder(sortOrderValue);
-    });
+    setSortBy(sortByValue);
+    setSortOrder(sortOrderValue);
   }
 
   function handleSortChange(nextSortBy: SortBy) {
     const nextSortOrder = nextSortBy === "name" ? "asc" : "desc";
     const applyChange = () => updateSort(nextSortBy, nextSortOrder);
 
-    if (deferSortChange) {
-      window.setTimeout(applyChange, 50);
-      return;
-    }
-
     applyChange();
   }
 
   function toggleSortOrder() {
-    startTransition(() => {
-      setSortOrder((current) => (current === "asc" ? "desc" : "asc"));
-    });
+    setSortOrder((current) => (current === "asc" ? "desc" : "asc"));
   }
 
   return {
