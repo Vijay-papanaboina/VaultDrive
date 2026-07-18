@@ -14,7 +14,7 @@ import {
   sortDriveFilesNewestFirst,
   upsertMetaFile,
 } from "@/lib/meta-decryption";
-import type { ProgressiveMetaFile, DriveMetaFile } from "@/types";
+import type { ProgressiveMetaFile, DriveMetaFile, DecryptionStatus } from "@/types";
 
 interface UseRecursiveMetaFilesResult {
   files: ProgressiveMetaFile[];
@@ -177,6 +177,21 @@ export function useRecursiveMetaFiles(
 
     const filesToDecrypt = sortDriveFilesNewestFirst(driveFiles);
 
+    const updateFileStatus = (fileId: string, folderId: string, status: DecryptionStatus) => {
+      if (cancelled || cancelRequestedRef.current) return;
+      setFiles((prev) => {
+        const match = prev.find((f) => f.driveFile.id === fileId);
+        if (!match) return prev;
+        return replaceMetaFile(prev, fileId, { ...match, status });
+      });
+      queryClient.setQueryData<ProgressiveMetaFile[]>(["decrypted-folder", folderId], (prev) => {
+        if (!prev) return prev;
+        const match = prev.find((f) => f.driveFile.id === fileId);
+        if (!match) return prev;
+        return replaceMetaFile(prev, fileId, { ...match, status });
+      });
+    };
+
     // Worker pool: same sizing logic as use-meta-files.ts
     const workerCount = Math.min(navigator.hardwareConcurrency || 2, 10);
     const workers: Worker[] = [];
@@ -186,8 +201,6 @@ export function useRecursiveMetaFiles(
 
     let nextJobIndex = 0;
 
-    // One downloader goroutine — 20 run in parallel via the pool below
-    // Exactly mirrors the original use-meta-files.ts downloader() logic
     async function downloader() {
       while (
         nextJobIndex < filesToDecrypt.length &&
@@ -218,6 +231,8 @@ export function useRecursiveMetaFiles(
         }
 
         try {
+          updateFileStatus(file.id, folderId, "downloading");
+
           const controller = new AbortController();
           activeFetches.add(controller);
           let bytes: Uint8Array;
@@ -232,6 +247,8 @@ export function useRecursiveMetaFiles(
           }
 
           if (cancelled || cancelRequestedRef.current) break;
+
+          updateFileStatus(file.id, folderId, "decrypting");
 
           const worker = workers[index % workerCount];
           const decrypted = await decryptWithWorker(
@@ -254,11 +271,7 @@ export function useRecursiveMetaFiles(
         } catch (err) {
           if (!cancelled && !cancelRequestedRef.current) {
             const msg = err instanceof Error ? err.message : "Decryption failed";
-            const nextFile: ProgressiveMetaFile = {
-              ...createPendingMetaFile(file),
-              decrypted: true,
-              decryptError: msg,
-            };
+            const nextFile = createResolvedMetaFile(file, { success: false, error: msg });
             setFiles((prev) => replaceMetaFile(prev, file.id, nextFile));
             queryClient.setQueryData<ProgressiveMetaFile[]>(["decrypted-folder", folderId], (prev) => {
               return upsertMetaFile(prev ? prev : [], file.id, nextFile);

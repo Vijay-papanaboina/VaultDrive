@@ -26,6 +26,8 @@ export interface MetaDetails {
   extra?: Record<string, unknown>;     // optional — any key-value pairs
 }
 
+export type DecryptionStatus = "pending" | "downloading" | "decrypting" | "decrypted" | "error";
+
 /**
  * A single file in progressive loading state.
  * Created immediately when the Drive list is received (decrypted: false),
@@ -35,6 +37,7 @@ export interface ProgressiveMetaFile {
   driveFile: DriveMetaFile;
   originalFileName: string;
   decrypted: boolean;
+  status: DecryptionStatus;
   details?: MetaDetails;
   thumbnailBytes?: Uint8Array | null;
   thumbnailMimeType?: string | null;

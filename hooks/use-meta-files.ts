@@ -13,7 +13,7 @@ import {
   replaceMetaFile,
   sortDriveFilesNewestFirst,
 } from "@/lib/meta-decryption";
-import type { ProgressiveMetaFile, DriveMetaFile } from "@/types";
+import type { ProgressiveMetaFile, DriveMetaFile, DecryptionStatus } from "@/types";
 
 interface UseMetaFilesResult {
   files: ProgressiveMetaFile[];
@@ -81,6 +81,21 @@ export function useMetaFiles(
     const decryptedQueryKey = ["decrypted-folder", folderId];
     const filesToDecrypt = sortDriveFilesNewestFirst(driveFiles);
 
+    const updateFileStatus = (fileId: string, status: DecryptionStatus) => {
+      if (cancelled || cancelRequestedRef.current) return;
+      setFiles((prev) => {
+        const match = prev.find((f) => f.driveFile.id === fileId);
+        if (!match) return prev;
+        return replaceMetaFile(prev, fileId, { ...match, status });
+      });
+      queryClient.setQueryData<ProgressiveMetaFile[]>(decryptedQueryKey, (prev) => {
+        if (!prev) return prev;
+        const match = prev.find((f) => f.driveFile.id === fileId);
+        if (!match) return prev;
+        return replaceMetaFile(prev, fileId, { ...match, status });
+      });
+    };
+
     // Worker pool setup: dynamically capped at number of logical CPU cores (between 2 and 10)
     const workerCount = Math.min(navigator.hardwareConcurrency || 2, 10);
     const workers: Worker[] = [];
@@ -108,6 +123,8 @@ export function useMetaFiles(
         if (match && match.decrypted) continue;
 
         try {
+          updateFileStatus(file.id, "downloading");
+
           // Fetch bytes on main thread (highly non-blocking I/O)
           const controller = new AbortController();
           activeFetches.add(controller);
@@ -123,6 +140,8 @@ export function useMetaFiles(
           }
 
           if (cancelled || cancelRequestedRef.current) break;
+
+          updateFileStatus(file.id, "decrypting");
 
           // Delegate CPU heavy decryption to worker and await result
           const worker = workers[index % workerCount];
@@ -147,11 +166,7 @@ export function useMetaFiles(
         } catch (err) {
           if (!cancelled && !cancelRequestedRef.current) {
             const msg = err instanceof Error ? err.message : "Decryption failed";
-            const nextFile: ProgressiveMetaFile = {
-              ...createPendingMetaFile(file),
-              decrypted: true,
-              decryptError: msg,
-            };
+            const nextFile = createResolvedMetaFile(file, { success: false, error: msg });
 
             // Update React state purely
             setFiles((prev) => replaceMetaFile(prev, file.id, nextFile));

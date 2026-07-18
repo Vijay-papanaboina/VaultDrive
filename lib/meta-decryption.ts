@@ -32,6 +32,7 @@ export function createPendingMetaFile(file: DriveMetaFile): ProgressiveMetaFile 
     driveFile: file,
     originalFileName: file.name.replace(/\.meta$/i, ""),
     decrypted: false,
+    status: "pending",
   };
 }
 
@@ -44,6 +45,7 @@ export function createResolvedMetaFile(
       driveFile: file,
       originalFileName: file.name.replace(/\.meta$/i, ""),
       decrypted: true,
+      status: "decrypted",
       details: decrypted.result.details,
       thumbnailBytes: decrypted.result.thumbnailBytes ?? null,
       thumbnailMimeType: decrypted.result.thumbnailMimeType ?? null,
@@ -54,6 +56,7 @@ export function createResolvedMetaFile(
     driveFile: file,
     originalFileName: file.name.replace(/\.meta$/i, ""),
     decrypted: true,
+    status: "error",
     decryptError: decrypted.error || "Decryption failed",
   };
 }
@@ -93,6 +96,7 @@ export function markUndecryptedFilesStopped(files: ProgressiveMetaFile[]) {
       : {
           ...file,
           decrypted: true,
+          status: "error" as const,
           decryptError: DECRYPTION_STOPPED_ERROR,
         }
   );
