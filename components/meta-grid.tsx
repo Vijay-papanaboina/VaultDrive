@@ -171,7 +171,7 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
         setSelected({
           driveFile: file.driveFile,
           details: file.details,
-          thumbnailBytes: file.thumbnailBytes ?? null,
+          thumbnailUrl: file.thumbnailUrl ?? null,
           thumbnailMimeType: file.thumbnailMimeType ?? null,
           originalFileName: file.originalFileName,
         });

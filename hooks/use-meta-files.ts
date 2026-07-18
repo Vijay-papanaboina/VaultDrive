@@ -185,16 +185,32 @@ export function useMetaFiles(
       // Check if we already have decrypted files in cache for this folder
       const cached = queryClient.getQueryData<ProgressiveMetaFile[]>(decryptedQueryKey);
       if (cached && cached.length === filesToDecrypt.length && cached.every((f) => f.decrypted)) {
-        setFiles(cached);
+        const validatedCached = cached.map((f) => {
+          if (f.decrypted && f.thumbnailBytes && !f.thumbnailUrl) {
+            const blob = new Blob([f.thumbnailBytes as unknown as BlobPart], {
+              type: f.thumbnailMimeType ?? "image/webp",
+            });
+            f.thumbnailUrl = URL.createObjectURL(blob);
+          }
+          return f;
+        });
+        setFiles(validatedCached);
         setIsDecrypting(false);
         return;
       }
 
       // Reconcile cached files by ID before seeding
       const cachedById = new Map(cached?.map((file) => [file.driveFile.id, file]));
-      const currentFiles = filesToDecrypt.map(createPendingMetaFile).map(
-        (file) => cachedById.get(file.driveFile.id) ?? file
-      );
+      const currentFiles = filesToDecrypt.map(createPendingMetaFile).map((file) => {
+        const match = cachedById.get(file.driveFile.id);
+        if (match && match.decrypted && match.thumbnailBytes && !match.thumbnailUrl) {
+          const blob = new Blob([match.thumbnailBytes as unknown as BlobPart], {
+            type: match.thumbnailMimeType ?? "image/webp",
+          });
+          match.thumbnailUrl = URL.createObjectURL(blob);
+        }
+        return match ?? file;
+      });
 
       setFiles(currentFiles);
       queryClient.setQueryData(decryptedQueryKey, currentFiles);

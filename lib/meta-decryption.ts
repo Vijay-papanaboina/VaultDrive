@@ -41,14 +41,22 @@ export function createResolvedMetaFile(
   decrypted: WorkerDecryptResult
 ): ProgressiveMetaFile {
   if (decrypted.success && decrypted.result) {
+    let thumbnailUrl: string | null = null;
+    if (decrypted.result.thumbnailBytes) {
+      const blob = new Blob([decrypted.result.thumbnailBytes as unknown as BlobPart], {
+        type: decrypted.result.thumbnailMimeType ?? "image/webp",
+      });
+      thumbnailUrl = URL.createObjectURL(blob);
+    }
     return {
       driveFile: file,
       originalFileName: file.name.replace(/\.meta$/i, ""),
       decrypted: true,
       status: "decrypted",
       details: decrypted.result.details,
-      thumbnailBytes: decrypted.result.thumbnailBytes ?? null,
+      thumbnailBytes: null,
       thumbnailMimeType: decrypted.result.thumbnailMimeType ?? null,
+      thumbnailUrl,
     };
   }
 

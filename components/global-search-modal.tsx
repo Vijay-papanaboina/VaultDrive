@@ -101,7 +101,7 @@ export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
         setSelectedDetail({
           driveFile: file.driveFile,
           details: file.details,
-          thumbnailBytes: file.thumbnailBytes ?? null,
+          thumbnailUrl: file.thumbnailUrl ?? null,
           thumbnailMimeType: file.thumbnailMimeType ?? null,
           originalFileName: file.originalFileName,
         });

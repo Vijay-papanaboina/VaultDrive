@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, memo } from "react";
+import { memo } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -53,46 +53,9 @@ export const MetaCard = memo(
       originalFileName,
       decrypted,
       details,
-      thumbnailBytes,
-      thumbnailMimeType,
+      thumbnailUrl,
       decryptError,
     } = meta;
-    const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
-
-    useEffect(() => {
-      if (!thumbnailBytes) {
-        setThumbnailUrl(null);
-        return;
-      }
-
-      const blob = new Blob([thumbnailBytes as unknown as BlobPart], {
-        type: thumbnailMimeType ?? "image/webp",
-      });
-      const url = URL.createObjectURL(blob);
-
-      // Swap atomically — revoke the old URL at the same time we set the new one,
-      // so thumbnailUrl is never null between transitions (no skeleton flash).
-      setThumbnailUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev);
-        return url;
-      });
-
-      // Cleanup only revokes if this effect re-runs before setState above fires
-      // (e.g. StrictMode double-invoke). Unmount cleanup is handled separately below.
-      return () => {
-        URL.revokeObjectURL(url);
-      };
-    }, [thumbnailBytes, thumbnailMimeType]);
-
-    // Revoke the active blob URL on unmount only.
-    useEffect(() => {
-      return () => {
-        setThumbnailUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev);
-          return null;
-        });
-      };
-    }, []);
 
     const isClickable = isSelectionMode || (decrypted && !decryptError);
 
@@ -158,11 +121,6 @@ export const MetaCard = memo(
               // loading="eager"
               className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
             />
-          ) : thumbnailBytes ? (
-            // Image is loading from blob URL (split second lag)
-            <div className="flex h-full w-full items-center justify-center bg-white/3">
-              <Loader2 className="h-10 w-10 text-muted-foreground/30 animate-spin" />
-            </div>
           ) : (
             // Decrypted file with no thumbnail at all: show generic file icon
             <div className="flex h-full w-full items-center justify-center">

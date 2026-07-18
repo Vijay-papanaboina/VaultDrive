@@ -293,6 +293,12 @@ export function useRecursiveMetaFiles(
       const initialList: ProgressiveMetaFile[] = filesToDecrypt.map((f) => {
         const cached = queryClient.getQueryData<ProgressiveMetaFile[]>(["decrypted-folder", f.folderId]) || [];
         const match = cached.find((c) => c.driveFile.id === f.id);
+        if (match && match.decrypted && match.thumbnailBytes && !match.thumbnailUrl) {
+          const blob = new Blob([match.thumbnailBytes as unknown as BlobPart], {
+            type: match.thumbnailMimeType ?? "image/webp",
+          });
+          match.thumbnailUrl = URL.createObjectURL(blob);
+        }
         return match ?? createPendingMetaFile(f);
       });
 

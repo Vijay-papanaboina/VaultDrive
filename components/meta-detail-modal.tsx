@@ -1,6 +1,5 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import {
   Dialog,
   DialogContent,
@@ -11,7 +10,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import type { DecryptedMeta } from "@/types";
-import { Calendar, FileText, HardDrive, Tag, X, FileArchive } from "lucide-react";
+import { Calendar, FileText, HardDrive, Tag, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface MetaDetailModalProps {
@@ -42,31 +41,9 @@ function formatDate(iso: string): string {
 }
 
 export function MetaDetailModal({ meta, onClose }: MetaDetailModalProps) {
-  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
-
-  const thumbnailBytes = meta?.thumbnailBytes;
-  const thumbnailMimeType = meta?.thumbnailMimeType;
-
-  useEffect(() => {
-    if (!thumbnailBytes) return;
-
-    const blob = new Blob([thumbnailBytes as unknown as BlobPart], { type: thumbnailMimeType ?? "image/webp" });
-    const url = URL.createObjectURL(blob);
-    
-    const handle = requestAnimationFrame(() => {
-      setThumbnailUrl(url);
-    });
-
-    return () => {
-      cancelAnimationFrame(handle);
-      URL.revokeObjectURL(url);
-      setThumbnailUrl(null);
-    };
-  }, [thumbnailBytes, thumbnailMimeType]);
-
   if (!meta) return null;
 
-  const { details, originalFileName, driveFile } = meta;
+  const { details, originalFileName, driveFile, thumbnailUrl } = meta;
 
   return (
     <Dialog open={!!meta} onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -87,7 +64,7 @@ export function MetaDetailModal({ meta, onClose }: MetaDetailModalProps) {
               />
             ) : (
               <div className="flex aspect-video w-full items-center justify-center">
-                <FileArchive className="h-16 w-16 text-muted-foreground/20" />
+                <FileText className="h-16 w-16 text-muted-foreground/20" />
               </div>
             )}
             {/* Close button overlay */}
