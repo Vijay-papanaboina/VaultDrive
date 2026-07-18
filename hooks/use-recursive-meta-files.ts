@@ -32,7 +32,7 @@ export function useRecursiveMetaFiles(
   rootFolderId: string,
   rootFolderName?: string,
 ): UseRecursiveMetaFilesResult {
-  const { hasPassphrase, getPassphrase } = useCrypto();
+  const { hasPassphrase, getPassphrase, setDismissedPassphraseError } = useCrypto();
   const queryClient = useQueryClient();
 
   const [isCrawling, setIsCrawling] = useState(true);
@@ -73,7 +73,7 @@ export function useRecursiveMetaFiles(
           if (!active) return;
           const currentId = queue.shift()!;
           const currentPath = pathMap[currentId];
-          const subfolders = await fetchSubfolders(currentId);
+          const subfolders = await fetchSubfolders(currentId, refreshKey > 0);
           for (const sub of subfolders) {
             if (!foundIds.includes(sub.id)) {
               foundIds.push(sub.id);
@@ -107,9 +107,9 @@ export function useRecursiveMetaFiles(
     queryKey: ["recursive-meta-list", rootFolderId, discoveredFolderIds, refreshKey],
     queryFn: async () => {
       const promises = discoveredFolderIds.map(async (folderId) => {
-        const fileList = await fetchMetaList(folderId);
+        const fileList = await fetchMetaList(folderId, refreshKey > 0);
         // Seed per-folder list cache so global search modal picks them up
-        queryClient.setQueryData(["meta-list", folderId], fileList);
+        queryClient.setQueryData(["meta-list", folderId, refreshKey], fileList);
         return fileList.map((f) => ({ ...f, folderId }));
       });
       const results = await Promise.all(promises);
@@ -123,11 +123,12 @@ export function useRecursiveMetaFiles(
     cancelRequestedRef.current = false;
     setDecryptError(null);
     setCrawlerError(null);
+    setDismissedPassphraseError(false);
     queryClient.removeQueries({ queryKey: ["recursive-meta-list", rootFolderId] });
     setDiscoveredFolderIds([]);
     setFolderIdToPath({});
     setRefreshKey((k) => k + 1);
-  }, [queryClient, rootFolderId]);
+  }, [queryClient, rootFolderId, setDismissedPassphraseError]);
 
   const cancelDecryption = useCallback(() => {
     cancelRequestedRef.current = true;
@@ -239,6 +240,7 @@ export function useRecursiveMetaFiles(
           try {
             const res = await fetch(`/api/drive/meta/${file.id}`, {
               signal: controller.signal,
+              cache: refreshKey > 0 ? "no-store" : undefined,
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             bytes = new Uint8Array(await res.arrayBuffer());

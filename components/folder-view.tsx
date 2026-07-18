@@ -26,12 +26,22 @@ export function FolderView({ folderId }: FolderViewProps) {
   } = useCrypto();
 
   const {
+    files,
+    isListLoading,
+    isDecrypting,
+    error: metaError,
+    refetch,
+    cancelDecryption,
+    refreshKey,
+  } = useMetaFiles(folderId);
+
+  const {
     data: subFolders = [],
     isLoading: isFoldersLoading,
     error: foldersError,
   } = useQuery<DriveFolder[]>({
-    queryKey: ["subfolders", folderId],
-    queryFn: () => fetchSubfolders(folderId),
+    queryKey: ["subfolders", folderId, refreshKey],
+    queryFn: () => fetchSubfolders(folderId, refreshKey > 0),
     enabled: !!folderId,
   });
 
@@ -40,19 +50,11 @@ export function FolderView({ folderId }: FolderViewProps) {
     isLoading: isPathLoading,
     error: pathError,
   } = useQuery<BreadcrumbItem[]>({
-    queryKey: ["breadcrumbs", folderId],
-    queryFn: () => fetchBreadcrumbs(folderId),
+    queryKey: ["breadcrumbs", folderId, refreshKey],
+    queryFn: () => fetchBreadcrumbs(folderId, refreshKey > 0),
     enabled: !!folderId,
   });
 
-  const {
-    files,
-    isListLoading,
-    isDecrypting,
-    error: metaError,
-    refetch,
-    cancelDecryption,
-  } = useMetaFiles(folderId);
   const relativePath = breadcrumbsToRelativePath(breadcrumbs);
 
   const isLoading = isFoldersLoading || isPathLoading;

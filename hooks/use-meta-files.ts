@@ -22,37 +22,39 @@ interface UseMetaFilesResult {
   error: string | null;     // top-level error (list fetch failed etc.)
   refetch: () => void;
   cancelDecryption: () => void;
+  refreshKey: number;
 }
 
 export function useMetaFiles(
   folderId: string,
   initialFiles?: DriveMetaFile[]
 ): UseMetaFilesResult {
-  const { hasPassphrase, getPassphrase } = useCrypto();
+  const { hasPassphrase, getPassphrase, setDismissedPassphraseError } = useCrypto();
   const queryClient = useQueryClient();
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  // Query 1: Fetch list of DriveMetaFile
   const { data: driveFiles, error: listError, isLoading: isListLoading } = useQuery<DriveMetaFile[]>({
-    queryKey: ["meta-list", folderId],
-    queryFn: () => fetchMetaList(folderId),
+    queryKey: ["meta-list", folderId, refreshKey],
+    queryFn: () => fetchMetaList(folderId, refreshKey > 0),
     enabled: !!folderId && hasPassphrase,
-    initialData: initialFiles,
+    initialData: refreshKey === 0 ? initialFiles : undefined,
   });
 
   const [files, setFiles] = useState<ProgressiveMetaFile[]>([]);
   const [isDecrypting, setIsDecrypting] = useState(false);
   const [decryptError, setDecryptError] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
   const cancelRequestedRef = useRef(false);
   const activeFetchesRef = useRef<Set<AbortController>>(new Set());
 
   const refetch = useCallback(() => {
     cancelRequestedRef.current = false;
     setDecryptError(null);
+    setDismissedPassphraseError(false);
     queryClient.removeQueries({ queryKey: ["meta-list", folderId] });
     queryClient.removeQueries({ queryKey: ["decrypted-folder", folderId] });
+    queryClient.removeQueries({ queryKey: ["subfolders", folderId] });
     setRefreshKey((k) => k + 1);
-  }, [queryClient, folderId]);
+  }, [queryClient, folderId, setDecryptError, setRefreshKey, setDismissedPassphraseError]);
 
   const cancelDecryption = useCallback(() => {
     cancelRequestedRef.current = true;
@@ -67,7 +69,7 @@ export function useMetaFiles(
     queryClient.setQueryData<ProgressiveMetaFile[]>(decryptedQueryKey, (prev) =>
       prev ? markUndecryptedFilesStopped(prev) : prev
     );
-  }, [folderId, queryClient]);
+  }, [folderId, queryClient, setIsDecrypting, setFiles]);
 
   useEffect(() => {
     if (!folderId || !hasPassphrase || !driveFiles) return;
@@ -132,6 +134,7 @@ export function useMetaFiles(
           try {
             const res = await fetch(`/api/drive/meta/${file.id}`, {
               signal: controller.signal,
+              cache: refreshKey > 0 ? "no-store" : undefined,
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             bytes = new Uint8Array(await res.arrayBuffer());
@@ -260,5 +263,6 @@ export function useMetaFiles(
     error: errorMsg,
     refetch,
     cancelDecryption,
+    refreshKey,
   };
 }
