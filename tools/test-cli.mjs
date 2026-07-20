@@ -1,7 +1,8 @@
 import fs from "fs";
 import path from "path";
-import crypto from "crypto";
+import argon2 from "argon2";
 import { spawn } from "child_process";
+
 
 // Core crypto libraries used to verify output
 import * as fflate from "fflate";
@@ -12,6 +13,7 @@ const TEST_DIR = path.resolve("./ignore/test-input");
 const MIRROR_OUTPUT_DIR = path.resolve("./ignore/encrypted-output");
 const DECRYPTED_DIR = path.resolve("./ignore/decrypted-output");
 const PASSPHRASE = "test-secure-passphrase-12345";
+const TEST_EMAIL = "test@example.com";
 const START_ID = 100;
 
 // Test cases grouped by directory level
@@ -34,15 +36,16 @@ const verificationState = {
 /**
  * Derive deterministic X25519 identity keypair matching the browser implementation.
  */
-function deriveAgeIdentity(passphrase) {
-  const salt = Buffer.from("vaultdrive-deterministic-salt-x25519-generation");
-  const privateKeyBytes = crypto.pbkdf2Sync(
-    passphrase,
-    salt,
-    10000,
-    32,
-    "sha256"
-  );
+async function deriveAgeIdentity(passphrase, email = TEST_EMAIL) {
+  const privateKeyBytes = await argon2.hash(passphrase, {
+    raw: true,
+    salt: Buffer.from(email),
+    timeCost: 3,
+    memoryCost: 65536,
+    hashLength: 32,
+    parallelism: 1,
+    type: argon2.argon2id,
+  });
   return bech32.encodeFromBytes("AGE-SECRET-KEY-", privateKeyBytes).toUpperCase();
 }
 
@@ -51,6 +54,7 @@ async function runPackager(args) {
     console.log(`\n🚀 Spawning vaultdrive-cli.mjs with args: ${args.join(" ")}`);
     const child = spawn("node", [
       "tools/vaultdrive-cli.mjs",
+      "-e", TEST_EMAIL,
       ...args
     ], { stdio: ["pipe", "pipe", "inherit"] });
 
@@ -204,28 +208,19 @@ async function verifyLevel(outputLevelDir, refLevelDir, testCases, identity) {
       let decryptedPayload;
       let decryptedName = "";
       try {
-        const rawBuffer = fs.readFileSync(payloadPath);
-        if (rawBuffer.length < 4) throw new Error("File too small to contain length header");
-        const nameLen = rawBuffer.readUInt32BE(0);
-        
-        if (rawBuffer.length < 4 + nameLen) throw new Error("File corrupted: length mismatch");
-        const encName = new Uint8Array(rawBuffer.subarray(4, 4 + nameLen));
-        const encPayload = new Uint8Array(rawBuffer.subarray(4 + nameLen));
+        const rawBuffer = new Uint8Array(fs.readFileSync(payloadPath));
+        const dec = new Decrypter();
+        dec.addIdentity(identity);
+        const unencryptedBytes = await dec.decrypt(rawBuffer);
 
-        // Decrypt filename
-        const nameDec = new Decrypter();
-        nameDec.addIdentity(identity);
-        const nameBytes = await nameDec.decrypt(encName);
-        decryptedName = Buffer.from(nameBytes).toString("utf8");
+        const nameLen = Buffer.from(unencryptedBytes.buffer, unencryptedBytes.byteOffset, 4).readUInt32BE(0);
+        decryptedName = Buffer.from(unencryptedBytes.buffer, unencryptedBytes.byteOffset + 4, nameLen).toString("utf8");
 
         if (decryptedName !== originalName) {
           throw new Error(`Filename mismatch! Decrypted: "${decryptedName}", Expected: "${originalName}"`);
         }
 
-        // Decrypt payload
-        const dec = new Decrypter();
-        dec.addIdentity(identity);
-        decryptedPayload = await dec.decrypt(encPayload);
+        decryptedPayload = unencryptedBytes.subarray(4 + nameLen);
         
         report.payload = { status: "passed", details: `Decrypted name "${decryptedName}" and payload successfully using derived key` };
       } catch (payErr) {
@@ -288,7 +283,7 @@ async function verifyLevel(outputLevelDir, refLevelDir, testCases, identity) {
 }
 
 async function verifyAllLevels(outputBaseDir, isMirrorMode) {
-  const identity = deriveAgeIdentity(PASSPHRASE);
+  const identity = await deriveAgeIdentity(PASSPHRASE, TEST_EMAIL);
   console.log(`🔑 Derived verification identity key: ${identity}`);
 
   let totalFailedIntentional = 0;

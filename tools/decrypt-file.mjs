@@ -1,13 +1,39 @@
 #!/usr/bin/env node
 import fs from "fs";
 import path from "path";
-import crypto from "crypto";
+import argon2 from "argon2";
 import readline from "readline";
 import { Writable, Readable } from "stream";
 
 // Load ES module dependencies from root
 import { bech32 } from "@scure/base";
 import { Decrypter } from "age-encryption";
+
+const DEFAULT_EMAIL = "";
+
+function askEmail(query) {
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) {
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: new Writable({ write: () => {} })
+      });
+      rl.on("line", (line) => {
+        rl.close();
+        resolve(line.trim());
+      });
+      return;
+    }
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+    rl.question(query, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
 
 /**
  * Secure password input using terminal raw mode.
@@ -61,15 +87,16 @@ function askPassphrase(query) {
 /**
  * Derive deterministic X25519 identity keypair matching the browser implementation.
  */
-function deriveAgeIdentity(passphrase) {
-  const salt = Buffer.from("vaultdrive-deterministic-salt-x25519-generation");
-  const privateKeyBytes = crypto.pbkdf2Sync(
-    passphrase,
-    salt,
-    10000, // iterations
-    32,    // length
-    "sha256"
-  );
+async function deriveAgeIdentity(passphrase, email) {
+  const privateKeyBytes = await argon2.hash(passphrase, {
+    raw: true,
+    salt: Buffer.from(email),
+    timeCost: 3,
+    memoryCost: 65536,
+    hashLength: 32,
+    parallelism: 1,
+    type: argon2.argon2id,
+  });
   return bech32.encodeFromBytes("AGE-SECRET-KEY-", privateKeyBytes).toUpperCase();
 }
 
@@ -87,40 +114,22 @@ Options:
   --dir, -d         Path to a directory containing encrypted files to scan recursively
   --output, -o      (Optional) Directory where mirrored decrypted structure is written.
                     If omitted, decrypts in-place inside 'decrypted/' folders.
+  --email, -e       Account email address for Argon2id salt derivation
   --help, -h        Display this help message
 `);
 }
 
 /**
- * Detects if a file is age-encrypted and if it is plain (like a .meta file)
- * or packaged (with a prepended 4-byte filename length and filename).
+ * Detects if a file is age-encrypted.
  */
 function detectFileType(filePath) {
   let fd;
   try {
     fd = fs.openSync(filePath, "r");
-    const buffer = Buffer.alloc(4);
-    const bytesRead = fs.readSync(fd, buffer, 0, 4, 0);
-    if (bytesRead < 4) {
-      return { isAge: false };
-    }
-
-    // Check direct magic first (at offset 0)
-    const directMagicBuffer = Buffer.alloc(21);
-    const directRead = fs.readSync(fd, directMagicBuffer, 0, 21, 0);
-    if (directRead === 21 && directMagicBuffer.toString("utf8") === "age-encryption.org/v1") {
-      return { isAge: true, type: "plain" };
-    }
-
-    // Now check if it's a packaged payload file
-    const nameLen = buffer.readUInt32BE(0);
-    // Sanity check: is nameLen reasonable? (e.g. < 4096 bytes)
-    if (nameLen > 0 && nameLen < 4096) {
-      const packageMagicBuffer = Buffer.alloc(21);
-      const packageRead = fs.readSync(fd, packageMagicBuffer, 0, 21, 4 + nameLen);
-      if (packageRead === 21 && packageMagicBuffer.toString("utf8") === "age-encryption.org/v1") {
-        return { isAge: true, type: "packaged", nameLen };
-      }
+    const magicBuffer = Buffer.alloc(21);
+    const bytesRead = fs.readSync(fd, magicBuffer, 0, 21, 0);
+    if (bytesRead === 21 && magicBuffer.toString("utf8") === "age-encryption.org/v1") {
+      return { isAge: true };
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -138,50 +147,72 @@ function detectFileType(filePath) {
   return { isAge: false };
 }
 
-async function decryptPackagedFile(filePath, nameLen, outputDir, identity) {
-  const fd = fs.openSync(filePath, "r");
-  const encNameBuffer = Buffer.alloc(nameLen);
-  const readNameLen = fs.readSync(fd, encNameBuffer, 0, nameLen, 4);
-  fs.closeSync(fd);
-  if (readNameLen < nameLen) {
-    throw new Error("Encrypted file is corrupted (name length mismatch).");
-  }
-
-  // Decrypt filename
-  let originalName = "";
-  try {
-    const nameDec = new Decrypter();
-    nameDec.addIdentity(identity);
-    const encNameBytes = new Uint8Array(encNameBuffer);
-    const nameBytes = await nameDec.decrypt(encNameBytes);
-    originalName = Buffer.from(nameBytes).toString("utf8");
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Decryption failed for filename: ${message}. Wrong passphrase?`);
-  }
-
-  const resolvedOutputPath = path.join(outputDir, originalName);
-
-  // Create write stream for the decrypted output file
-  const writeStream = fs.createWriteStream(resolvedOutputPath);
-
-  // Stream decrypt the rest of the file
+async function decryptSinglePassPayload(filePath, outputDir, identity) {
   const dec = new Decrypter();
   dec.addIdentity(identity);
 
-  const nodeReadStream = fs.createReadStream(filePath, { start: 4 + nameLen });
+  const nodeReadStream = fs.createReadStream(filePath);
   const webReadStream = Readable.toWeb(nodeReadStream);
   const decryptedWebStream = await dec.decrypt(webReadStream);
   const nodeDecryptedReadStream = Readable.fromWeb(decryptedWebStream);
 
-  await new Promise((resolve, reject) => {
-    nodeDecryptedReadStream.pipe(writeStream);
-    writeStream.on("finish", resolve);
-    nodeDecryptedReadStream.on("error", reject);
-    writeStream.on("error", reject);
-  });
+  return new Promise((resolve, reject) => {
+    let state = "HEADER_LEN";
+    let lenBuffer = Buffer.alloc(0);
+    let nameLen = 0;
+    let nameBuffer = Buffer.alloc(0);
+    let writeStream = null;
+    let outputPath = "";
 
-  return resolvedOutputPath;
+    nodeDecryptedReadStream.on("data", (chunk) => {
+      let offset = 0;
+      while (offset < chunk.length) {
+        if (state === "HEADER_LEN") {
+          const needed = 4 - lenBuffer.length;
+          const available = chunk.length - offset;
+          const toRead = Math.min(needed, available);
+          lenBuffer = Buffer.concat([lenBuffer, chunk.slice(offset, offset + toRead)]);
+          offset += toRead;
+
+          if (lenBuffer.length === 4) {
+            nameLen = lenBuffer.readUInt32BE(0);
+            state = "HEADER_NAME";
+          }
+        } else if (state === "HEADER_NAME") {
+          const needed = nameLen - nameBuffer.length;
+          const available = chunk.length - offset;
+          const toRead = Math.min(needed, available);
+          nameBuffer = Buffer.concat([nameBuffer, chunk.slice(offset, offset + toRead)]);
+          offset += toRead;
+
+          if (nameBuffer.length === nameLen) {
+            const originalName = nameBuffer.toString("utf8");
+            outputPath = path.join(outputDir, originalName);
+            writeStream = fs.createWriteStream(outputPath);
+            writeStream.on("error", reject);
+            state = "STREAMING";
+          }
+        } else if (state === "STREAMING") {
+          const remaining = chunk.slice(offset);
+          if (remaining.length > 0 && writeStream) {
+            writeStream.write(remaining);
+          }
+          break;
+        }
+      }
+    });
+
+    nodeDecryptedReadStream.on("end", () => {
+      if (writeStream) {
+        writeStream.end();
+        writeStream.on("finish", () => resolve(outputPath));
+      } else {
+        reject(new Error("Decryption output ended prematurely before header parsing completed."));
+      }
+    });
+
+    nodeDecryptedReadStream.on("error", reject);
+  });
 }
 
 async function decryptPlainFile(filePath, outputDir, identity) {
@@ -251,16 +282,16 @@ async function processDir(currentDir, baseInputDir, resolvedOutputDir, identity,
       fs.mkdirSync(targetOutputDir, { recursive: true });
     }
 
-    for (const { filePath, info } of ageFiles) {
+    for (const { filePath } of ageFiles) {
       state.totalFiles++;
       const fileName = path.basename(filePath);
       console.log(`Processing file: ${fileName}...`);
       try {
         let resolvedOutputPath = "";
-        if (info.type === "packaged") {
-          resolvedOutputPath = await decryptPackagedFile(filePath, info.nameLen, targetOutputDir, identity);
-        } else {
+        if (fileName.toLowerCase().endsWith(".meta")) {
           resolvedOutputPath = await decryptPlainFile(filePath, targetOutputDir, identity);
+        } else {
+          resolvedOutputPath = await decryptSinglePassPayload(filePath, targetOutputDir, identity);
         }
         console.log(`  \x1b[32m✓ Decrypted:\x1b[0m ${fileName} -> ${resolvedOutputPath}`);
         state.successCount++;
@@ -284,6 +315,7 @@ async function main() {
   let filePath = "";
   let dirPath = "";
   let outputDir = "";
+  let email = DEFAULT_EMAIL;
   let showHelp = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -293,6 +325,8 @@ async function main() {
       dirPath = args[++i];
     } else if (args[i] === "--output" || args[i] === "-o") {
       outputDir = args[++i];
+    } else if (args[i] === "--email" || args[i] === "-e") {
+      email = args[++i];
     } else if (args[i] === "--help" || args[i] === "-h") {
       showHelp = true;
     }
@@ -314,6 +348,15 @@ async function main() {
     process.exit(1);
   }
 
+  // Ensure email is resolved
+  if (!email || !email.trim()) {
+    email = await askEmail("Enter account email: ");
+    if (!email || !email.trim()) {
+      console.error("\nError: Account email is required for key derivation.");
+      process.exit(1);
+    }
+  }
+
   if (filePath) {
     if (!fs.existsSync(filePath)) {
       console.error(`Error: Encrypted file does not exist at ${filePath}`);
@@ -330,7 +373,7 @@ async function main() {
       console.error("\nError: Passphrase cannot be empty.");
       process.exit(1);
     }
-    const identity = deriveAgeIdentity(passphrase.trim());
+    const identity = await deriveAgeIdentity(passphrase.trim(), email.trim());
 
     const destDir = outputDir || ".";
     if (!fs.existsSync(destDir)) {
@@ -340,10 +383,10 @@ async function main() {
     console.log(`Processing file: ${path.basename(filePath)}...`);
     try {
       let resolvedOutputPath = "";
-      if (info.type === "packaged") {
-        resolvedOutputPath = await decryptPackagedFile(filePath, info.nameLen, destDir, identity);
-      } else {
+      if (path.basename(filePath).toLowerCase().endsWith(".meta")) {
         resolvedOutputPath = await decryptPlainFile(filePath, destDir, identity);
+      } else {
+        resolvedOutputPath = await decryptSinglePassPayload(filePath, destDir, identity);
       }
       console.log(`  \x1b[32m✓ Decrypted:\x1b[0m ${path.basename(filePath)} -> ${resolvedOutputPath}`);
     } catch (err) {
@@ -363,7 +406,7 @@ async function main() {
       console.error("\nError: Passphrase cannot be empty.");
       process.exit(1);
     }
-    const identity = deriveAgeIdentity(passphrase.trim());
+    const identity = await deriveAgeIdentity(passphrase.trim(), email.trim());
 
     const resolvedOutputDir = outputDir ? path.resolve(outputDir) : "";
     const baseInputDir = path.resolve(dirPath);

@@ -1,14 +1,41 @@
 #!/usr/bin/env node
 import fs from "fs";
 import path from "path";
-import crypto from "crypto";
+import argon2 from "argon2";
 import readline from "readline";
 import { Writable, Readable } from "stream";
+
 
 // Load ES module dependencies from root
 import * as fflate from "fflate";
 import { bech32 } from "@scure/base";
 import { Encrypter, identityToRecipient } from "age-encryption";
+
+const DEFAULT_EMAIL = "";
+
+function askEmail(query) {
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) {
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: new Writable({ write: () => {} })
+      });
+      rl.on("line", (line) => {
+        rl.close();
+        resolve(line.trim());
+      });
+      return;
+    }
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+    rl.question(query, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
 
 /**
  * Secure password input using terminal raw mode.
@@ -67,15 +94,16 @@ function askPassphrase(query) {
 /**
  * Derive deterministic X25519 identity keypair matching the browser implementation.
  */
-async function deriveAgeKeys(passphrase) {
-  const salt = Buffer.from("vaultdrive-deterministic-salt-x25519-generation");
-  const privateKeyBytes = crypto.pbkdf2Sync(
-    passphrase,
-    salt,
-    10000, // iterations
-    32,    // length
-    "sha256"
-  );
+async function deriveAgeKeys(passphrase, email) {
+  const privateKeyBytes = await argon2.hash(passphrase, {
+    raw: true,
+    salt: Buffer.from(email),
+    timeCost: 3,
+    memoryCost: 65536,
+    hashLength: 32,
+    parallelism: 1,
+    type: argon2.argon2id,
+  });
 
   // Encode to Bech32 matching age specification (uppercase prefix)
   const identity = bech32.encodeFromBytes("AGE-SECRET-KEY-", privateKeyBytes).toUpperCase();
@@ -99,6 +127,7 @@ Options:
   --output, -o      (Optional) Directory where mirrored encrypted structure is written.
                     If omitted, encrypts in-place inside 'encrypted/' folders.
   --start-id, -s    Starting ID number for file naming (increments globally for each file)
+  --email, -e       Account email address for Argon2id salt derivation
   --keys, -k        Derive and display Public/Private keys from a passphrase, then exit
   --help, -h        Display this help message
 `);
@@ -109,6 +138,7 @@ async function main() {
   let inputDir = "";
   let outputDir = "";
   let startIdStr = "";
+  let email = DEFAULT_EMAIL;
   let deriveOnly = false;
   let showHelp = false;
 
@@ -119,6 +149,8 @@ async function main() {
       outputDir = args[++i];
     } else if (args[i] === "--start-id" || args[i] === "-s") {
       startIdStr = args[++i];
+    } else if (args[i] === "--email" || args[i] === "-e") {
+      email = args[++i];
     } else if (args[i] === "--keys" || args[i] === "-k") {
       deriveOnly = true;
     } else if (args[i] === "--help" || args[i] === "-h") {
@@ -130,6 +162,15 @@ async function main() {
   if (showHelp) {
     printUsage();
     process.exit(0);
+  }
+
+  // Ensure email is resolved
+  if (!email || !email.trim()) {
+    email = await askEmail("Enter account email: ");
+    if (!email || !email.trim()) {
+      console.error("\nError: Account email is required for key derivation.");
+      process.exit(1);
+    }
   }
 
   // 2. Handle key derivation mode
@@ -144,8 +185,8 @@ async function main() {
       console.error("\nError: Passphrases do not match.");
       process.exit(1);
     }
-    console.log("\nDeriving keys...");
-    const { identity, recipient } = await deriveAgeKeys(passphrase.trim());
+    console.log("\nDeriving keys with Argon2id...");
+    const { identity, recipient } = await deriveAgeKeys(passphrase.trim(), email.trim());
     console.log(`Derived Public Key (Recipient):  ${recipient}`);
     console.log(`Derived Private Key (Identity):  ${identity}`);
     process.exit(0);
@@ -190,7 +231,7 @@ async function main() {
   }
 
   // Derive keys silently for the packaging run
-  const { recipient } = await deriveAgeKeys(passphrase.trim());
+  const { recipient } = await deriveAgeKeys(passphrase.trim(), email.trim());
 
   console.log(`Scanning directory recursively: ${inputDir}`);
   const state = { currentId };
@@ -302,29 +343,30 @@ async function processDir(currentDir, inputDir, resolvedOutputDir, recipient, st
       const metaPath = path.join(targetOutputDir, metaFileName);
       fs.writeFileSync(metaPath, encryptedBytes);
 
-      // 5b. Encrypt filename and payload, output combined package as <ID>
+      // 5b. Encrypt single-pass combined stream: [4-byte len] + [filename] + [file contents] -> age -> <ID>
       const filenameBytes = Buffer.from(origFile, "utf8");
-      const nameEnc = new Encrypter();
-      nameEnc.addRecipient(recipient);
-      const encryptedNameBytes = await nameEnc.encrypt(filenameBytes);
-
-      const payloadFileName = `${currentId}`;
-      const payloadPath = path.join(targetOutputDir, payloadFileName);
-
-      const writeStream = fs.createWriteStream(payloadPath);
-
       const lenBuffer = Buffer.alloc(4);
-      lenBuffer.writeUInt32BE(encryptedNameBytes.length, 0);
-      writeStream.write(lenBuffer);
-      writeStream.write(Buffer.from(encryptedNameBytes));
+      lenBuffer.writeUInt32BE(filenameBytes.length, 0);
+      const headerBuffer = Buffer.concat([lenBuffer, filenameBytes]);
 
+      const nodeFileStream = fs.createReadStream(origPath);
+      const combinedNodeStream = Readable.from((async function* () {
+        yield headerBuffer;
+        for await (const chunk of nodeFileStream) {
+          yield chunk;
+        }
+      })());
+
+      const webCombinedStream = Readable.toWeb(combinedNodeStream);
       const payloadEnc = new Encrypter();
       payloadEnc.addRecipient(recipient);
 
-      const nodeReadStream = fs.createReadStream(origPath);
-      const webReadStream = Readable.toWeb(nodeReadStream);
-      const encryptedWebStream = await payloadEnc.encrypt(webReadStream);
+      const encryptedWebStream = await payloadEnc.encrypt(webCombinedStream);
       const nodeEncryptedReadStream = Readable.fromWeb(encryptedWebStream);
+
+      const payloadFileName = `${currentId}`;
+      const payloadPath = path.join(targetOutputDir, payloadFileName);
+      const writeStream = fs.createWriteStream(payloadPath);
 
       await new Promise((resolve, reject) => {
         nodeEncryptedReadStream.pipe(writeStream);
