@@ -9,6 +9,7 @@ import React, {
 } from "react";
 import { deriveAgeIdentity } from "@/lib/crypto";
 import { useQueryClient } from "@tanstack/react-query";
+import { useSession } from "@/lib/auth-client";
 
 interface CryptoContextValue {
   hasPassphrase: boolean;
@@ -25,7 +26,9 @@ interface CryptoContextValue {
 
 const CryptoContext = createContext<CryptoContextValue | null>(null);
 
+
 export function CryptoProvider({ children }: { children: ReactNode }) {
+  const { data: session } = useSession();
   // useRef keeps the derived private identity key in memory only — never written to storage
   const identityRef = useRef<string | null>(null);
   // useState for reactivity (so UI re-renders when passphrase is set/cleared)
@@ -45,7 +48,11 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
   }
 
   async function setPassphrase(pw: string) {
-    const identity = await deriveAgeIdentity(pw);
+    const email = session?.user?.email;
+    if (!email) {
+      throw new Error("Cannot set passphrase without an authenticated user email session.");
+    }
+    const identity = await deriveAgeIdentity(pw, email);
     identityRef.current = identity;
     setHasPassphrase(true);
     setPassphraseError(null);

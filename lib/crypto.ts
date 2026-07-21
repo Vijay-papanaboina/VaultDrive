@@ -4,6 +4,7 @@ import { Decrypter } from "age-encryption";
 import { unzipSync } from "fflate";
 import { bech32 } from "@scure/base";
 import type { MetaDetails } from "@/types";
+import { argon2id } from "hash-wasm";
 
 const IMAGE_EXTS = /\.(webp|jpg|jpeg|png|gif|avif|bmp|svg)$/i;
 
@@ -31,29 +32,17 @@ export interface DecryptedZipResult {
 /**
  * Derive deterministic X25519 identity keypair matching the browser implementation.
  */
-export async function deriveAgeIdentity(passphrase: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const passwordKey = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(passphrase),
-    "PBKDF2",
-    false,
-    ["deriveBits"]
-  );
+export async function deriveAgeIdentity(passphrase: string, email: string): Promise<string> {
+  const privateKeyBytes = await argon2id({
+    password: passphrase,
+    salt: email,
+    iterations: 3,
+    memorySize: 65536,
+    hashLength: 32,
+    parallelism: 1,
+    outputType: "binary",
+  });
 
-  const salt = encoder.encode("vaultdrive-deterministic-salt-x25519-generation");
-  const derivedBits = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      salt: salt,
-      iterations: 10000,
-      hash: "SHA-256",
-    },
-    passwordKey,
-    256 // 32 bytes * 8
-  );
-
-  const privateKeyBytes = new Uint8Array(derivedBits);
   return bech32.encodeFromBytes("AGE-SECRET-KEY-", privateKeyBytes).toUpperCase();
 }
 
