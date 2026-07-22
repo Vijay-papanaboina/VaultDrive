@@ -240,6 +240,8 @@ async function main() {
   console.log(`\nSuccess! Processing finished. Ending ID: ${state.currentId}`);
 }
 
+const IMAGE_EXTS = /\.(webp|jpg|jpeg|png|gif|avif|bmp|svg)$/i;
+
 async function processDir(currentDir, inputDir, resolvedOutputDir, recipient, state) {
   // Read all items in the current directory
   const items = fs.readdirSync(currentDir);
@@ -262,13 +264,13 @@ async function processDir(currentDir, inputDir, resolvedOutputDir, recipient, st
     }
   }
 
-  // Filter for webp files in the current folder
-  const webpFiles = files.filter((f) => f.toLowerCase().endsWith(".webp"));
+  // Filter for image preview files in the current folder
+  const imageFiles = files.filter((f) => IMAGE_EXTS.test(f));
 
   let targetOutputDir = "";
   let hasEncryptedFiles = false;
 
-  if (webpFiles.length > 0) {
+  if (imageFiles.length > 0) {
     // Determine output directory for this level
     if (resolvedOutputDir) {
       const relPath = path.relative(inputDir, currentDir);
@@ -277,14 +279,14 @@ async function processDir(currentDir, inputDir, resolvedOutputDir, recipient, st
       targetOutputDir = path.join(currentDir, "encrypted");
     }
 
-    for (const webpFile of webpFiles) {
-      const baseName = path.parse(webpFile).name;
-      const webpPath = path.join(currentDir, webpFile);
+    for (const imageFile of imageFiles) {
+      const baseName = path.parse(imageFile).name;
+      const imagePath = path.join(currentDir, imageFile);
 
       // Find the original file matching this base name in current folder
       const origFile = files.find((f) => {
         const parts = path.parse(f);
-        if (parts.name !== baseName || f === webpFile) return false;
+        if (parts.name !== baseName || f === imageFile) return false;
         const fullPath = path.join(currentDir, f);
         try {
           return fs.statSync(fullPath).isFile();
@@ -310,7 +312,7 @@ async function processDir(currentDir, inputDir, resolvedOutputDir, recipient, st
       const origSize = origStat.size;
 
       const currentId = state.currentId;
-      console.log(`[ID ${currentId}] Processing pair in ${path.relative(inputDir, currentDir) || "."}: ${origFile} <-> ${webpFile} (${(origSize / 1024).toFixed(1)} KB)`);
+      console.log(`[ID ${currentId}] Processing pair in ${path.relative(inputDir, currentDir) || "."}: ${origFile} <-> ${imageFile} (${(origSize / 1024).toFixed(1)} KB)`);
 
       // 1. Create details JSON
       const details = {
@@ -321,14 +323,14 @@ async function processDir(currentDir, inputDir, resolvedOutputDir, recipient, st
         },
       };
 
-      // 2. Read thumbnail webp bytes
-      const webpBytes = new Uint8Array(fs.readFileSync(webpPath));
+      // 2. Read preview image bytes
+      const imageBytes = new Uint8Array(fs.readFileSync(imagePath));
 
-      // 3. Zip files in-memory (no compression used as storage container)
+      // 3. Zip files in-memory preserving original image filename
       const zipData = fflate.zipSync(
         {
           "details.json": fflate.strToU8(JSON.stringify(details)),
-          "thumbnail.webp": webpBytes,
+          [imageFile]: imageBytes,
         },
         { level: 0 }
       );

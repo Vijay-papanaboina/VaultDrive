@@ -184,19 +184,20 @@ async function verifyLevel(outputLevelDir, refLevelDir, testCases, identity) {
       report.detailsJson = { status: "passed", details: `Valid schema. Matches name "${details.name}" and size ${details.extra.size_bytes} bytes` };
 
       // 4. Verify thumbnail image bytes
-      const thumbBytes = unzipped["thumbnail.webp"];
-      if (!thumbBytes) {
-        report.thumbnail = { status: "failed", details: "thumbnail.webp missing from decrypted package" };
-        throw new Error("thumbnail.webp missing");
+      const thumbEntry = Object.entries(unzipped).find(([name]) => name !== "details.json");
+      if (!thumbEntry) {
+        report.thumbnail = { status: "failed", details: "Thumbnail image missing from decrypted package" };
+        throw new Error("Thumbnail missing");
       }
 
+      const thumbBytes = thumbEntry[1];
       const expectedThumb = isIntentionalFailure ? verificationState.file4ExpectedThumb : testCase.thumbContent;
       const thumbContent = fflate.strFromU8(thumbBytes);
       if (thumbContent !== expectedThumb) {
         report.thumbnail = { status: "failed", details: `Byte mismatch! Image bytes did not match the original webp file.` };
         throw new Error("Thumbnail mismatch");
       }
-      report.thumbnail = { status: "passed", details: "Image bytes match the original webp thumbnail perfectly" };
+      report.thumbnail = { status: "passed", details: `Image bytes ("${thumbEntry[0]}") match the original webp thumbnail perfectly` };
 
       // 5. Verify original file payload
       const payloadPath = path.join(outputLevelDir, String(fileId));

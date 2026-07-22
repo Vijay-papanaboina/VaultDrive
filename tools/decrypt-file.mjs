@@ -215,15 +215,9 @@ async function decryptSinglePassPayload(filePath, outputDir, identity) {
   });
 }
 
-async function decryptPlainFile(filePath, outputDir, identity) {
+async function decryptMetaZip(filePath, outputDir, identity) {
   const fileName = path.basename(filePath);
-  let decryptedName = fileName + ".decrypted";
-  if (fileName.toLowerCase().endsWith(".meta")) {
-    decryptedName = fileName.slice(0, -5) + "-meta.zip";
-  }
-
-  const resolvedOutputPath = path.join(outputDir, decryptedName);
-  const writeStream = fs.createWriteStream(resolvedOutputPath);
+  const metaId = fileName.replace(/\.meta$/i, "");
 
   const dec = new Decrypter();
   dec.addIdentity(identity);
@@ -231,16 +225,36 @@ async function decryptPlainFile(filePath, outputDir, identity) {
   const nodeReadStream = fs.createReadStream(filePath);
   const webReadStream = Readable.toWeb(nodeReadStream);
   const decryptedWebStream = await dec.decrypt(webReadStream);
+
+  const chunks = [];
   const nodeDecryptedReadStream = Readable.fromWeb(decryptedWebStream);
+  for await (const chunk of nodeDecryptedReadStream) {
+    chunks.push(chunk);
+  }
+  const zipBytes = Buffer.concat(chunks);
 
-  await new Promise((resolve, reject) => {
-    nodeDecryptedReadStream.pipe(writeStream);
-    writeStream.on("finish", resolve);
-    nodeDecryptedReadStream.on("error", reject);
-    writeStream.on("error", reject);
-  });
+  // Unzip in-memory
+  const files = fflate.unzipSync(zipBytes);
 
-  return resolvedOutputPath;
+  // Ensure flattened meta folder exists at target output level
+  const metaOutputDir = path.join(outputDir, "meta");
+  if (!fs.existsSync(metaOutputDir)) {
+    fs.mkdirSync(metaOutputDir, { recursive: true });
+  }
+
+  const extractedPaths = [];
+
+  for (const [entryName, entryBytes] of Object.entries(files)) {
+    let targetFileName = entryName;
+    if (entryName === "details.json") {
+      targetFileName = `${metaId}.details.json`;
+    }
+    const targetPath = path.join(metaOutputDir, targetFileName);
+    fs.writeFileSync(targetPath, entryBytes);
+    extractedPaths.push(targetFileName);
+  }
+
+  return `meta/ [${extractedPaths.join(", ")}]`;
 }
 
 async function processDir(currentDir, baseInputDir, resolvedOutputDir, identity, state) {
@@ -289,7 +303,7 @@ async function processDir(currentDir, baseInputDir, resolvedOutputDir, identity,
       try {
         let resolvedOutputPath = "";
         if (fileName.toLowerCase().endsWith(".meta")) {
-          resolvedOutputPath = await decryptPlainFile(filePath, targetOutputDir, identity);
+          resolvedOutputPath = await decryptMetaZip(filePath, targetOutputDir, identity);
         } else {
           resolvedOutputPath = await decryptSinglePassPayload(filePath, targetOutputDir, identity);
         }
