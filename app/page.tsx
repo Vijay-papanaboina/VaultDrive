@@ -45,9 +45,9 @@ const features = [
   },
   {
     icon: Eye,
-    title: ".meta Files Only",
+    title: "Metadata First",
     description:
-      "The app only fetches lightweight .meta sidecar files — your actual encrypted files are never downloaded.",
+      "Browsing fetches lightweight .meta sidecar files. Original-file downloads fetch encrypted payloads only when you request them, then decrypt them in your browser.",
   },
   {
     icon: FolderKey,
@@ -127,8 +127,9 @@ export default function HomePage() {
               .meta
             </code>{" "}
             sidecar files from Google Drive, decrypts them in your browser, and
-            shows you a rich browsable view of your storage. Nothing heavy is
-            ever downloaded.
+            shows you a rich browsable view of your storage. Browsing stays
+            lightweight, while requested original files stream and decrypt in
+            your browser.
           </p>
         </div>
 

@@ -6,7 +6,7 @@ The Encrypted GDrive project acts as a secure, zero-knowledge overlay on top of 
 
 1. **Frontend (Client-Side)**: React 19 application running in the browser. It handles state management, local/recursive/global search, and strictly executes all cryptographic operations (`age-encryption` and `fflate`) in memory.
 2. **Backend (Proxy/Auth Layer)**: Next.js API Routes. It manages OAuth sessions using Better Auth (persisting session data locally in SQLite) and acts as a secure proxy. It attaches the user's Google Drive OAuth token to fetch encrypted blobs from the Google Drive API.
-3. **Storage Layer (Google Drive API)**: The actual Google Drive servers where files are stored. The data stored here consists of opaque folders and `.meta` files (which are age-encrypted zip archives).
+3. **Storage Layer (Google Drive API)**: The actual Google Drive servers where files are stored. The data stored here consists of opaque folders, numbered age-encrypted payloads, and `.meta` files (age-encrypted metadata zip archives). A payload is paired with a `.meta` file by sharing its folder and using the `.meta` filename without the final suffix.
 
 ## Shared Client Architecture
 
@@ -16,6 +16,7 @@ The current frontend separates page-specific data discovery from shared file-bro
 2. **View Shell**: `components/drive-file-browser.tsx` owns the shared file toolbar, inline search, sorting, refresh button, empty states, and `MetaGrid` rendering.
 3. **Prompt Handling**: `components/decryption-error-dialog.tsx` and `hooks/use-decryption-error-prompt.ts` own the wrong-passphrase / stop / re-enter flow for both normal and recursive pages.
 4. **Decryption Helpers**: `lib/meta-decryption.ts` centralizes the shared worker/decrypt/update helpers used by `useMetaFiles` and `useRecursiveMetaFiles`.
+5. **Download Pipeline**: `components/file-download-provider.tsx` resolves encrypted payloads through the authenticated API, passes the response body through age stream decryption, validates the small CLI-compatible filename header, and writes plaintext chunks directly to disk when the browser supports the File System Access API.
 
 ## Data Flow: Google OAuth to Decryption
 
@@ -37,7 +38,7 @@ sequenceDiagram
     
     User->>PassphraseGate: Enters Passphrase
     PassphraseGate->>Client (React): setPassphrase(password)
-    Client (React)->>Client (React): deriveAgeIdentity (PBKDF2) -> X25519 Key
+    Client (React)->>Client (React): deriveAgeIdentity (Argon2id) -> X25519 Key
     Client (React)->>Client (React): Store identityRef in Memory
     Client (React)->>PassphraseGate: hasPassphrase = true
     PassphraseGate-->>User: Grant Access & Render Shared Browser View
@@ -63,12 +64,21 @@ sequenceDiagram
     end
     
     Client (React)-->>User: Render Decrypted File Cards
+
+    User->>Client (React): Click Download on a card or selected-file action
+    Client (React)->>Next.js API: Request paired payload using meta file ID
+    Next.js API->>Google Drive API: Resolve same-parent filename without .meta, then GET payload
+    Google Drive API-->>Next.js API: Encrypted payload bytes
+    Next.js API-->>Client (React): Encrypted payload bytes
+    Client (React)->>Client (React): Worker decrypts payload and parses filename header
+    Client (React)-->>User: Save plaintext file with embedded original filename
 ```
 
 ## Security Guarantees
 - The passphrase is never transmitted to the server or Google Drive.
-- The `identityRef` derived from the passphrase is held strictly in memory and clears on reload or expiration.
-- The `.meta` blobs stored in Google Drive are completely opaque. They are standard zip files containing JSON metadata and thumbnails, but the entire zip archive is encrypted using `age-encryption`.
+- The `identityRef` derived from the passphrase is held strictly in memory and clears on reload or when the key is explicitly replaced or cleared.
+- The `.meta` blobs and payloads stored in Google Drive are completely opaque. Metadata is a zip containing JSON and thumbnails, while payloads contain a filename header and file bytes; both are encrypted using `age-encryption`.
+- Original-file downloads fetch encrypted payload bytes through the server proxy, but age decryption, filename parsing, and plaintext Blob creation all happen in the browser. Plaintext is not sent back to the server.
 - Better SQLite3 is used locally purely for Better Auth session management (if the Next.js app is hosted), keeping OAuth tokens secure.
 
 ## Search Pipeline

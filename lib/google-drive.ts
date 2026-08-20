@@ -8,6 +8,10 @@ function authHeaders(accessToken: string) {
   return { Authorization: `Bearer ${accessToken}` };
 }
 
+function escapeDriveQueryValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
 async function driveGet(
   accessToken: string,
   path: string,
@@ -90,9 +94,61 @@ export async function getFileContent(
   accessToken: string,
   fileId: string
 ): Promise<Uint8Array> {
-  const res = await driveGet(accessToken, `/files/${fileId}`, { alt: "media" });
+  const res = await driveGet(accessToken, `/files/${encodeURIComponent(fileId)}`, { alt: "media" });
   const buffer = await res.arrayBuffer();
   return new Uint8Array(buffer);
+}
+
+async function resolvePayloadFile(
+  accessToken: string,
+  metaFileId: string
+): Promise<{ id: string; name: string }> {
+  const metaRes = await driveGet(
+    accessToken,
+    `/files/${encodeURIComponent(metaFileId)}`,
+    { fields: "id,name,parents" }
+  );
+  const metaFile: { id: string; name: string; parents?: string[] } =
+    await metaRes.json();
+
+  if (!/\.meta$/i.test(metaFile.name)) {
+    throw new Error("The requested file is not a metadata file");
+  }
+
+  const parentId = metaFile.parents?.[0];
+  if (!parentId) {
+    throw new Error("Metadata file has no parent folder");
+  }
+
+  const payloadName = metaFile.name.replace(/\.meta$/i, "");
+  const q = `'${escapeDriveQueryValue(parentId)}' in parents and name = '${escapeDriveQueryValue(payloadName)}' and trashed = false`;
+  const payloads = await listAll(accessToken, q, "id,name");
+
+  if (payloads.length === 0) {
+    throw new Error(`No payload found beside ${metaFile.name}`);
+  }
+  if (payloads.length > 1) {
+    throw new Error(`Multiple payloads found beside ${metaFile.name}`);
+  }
+
+  return payloads[0];
+}
+
+/**
+ * Return the upstream encrypted payload response without buffering it.
+ * Payloads live beside their metadata file and use the metadata filename
+ * without the final `.meta` suffix (for example, `42.meta` -> `42`).
+ */
+export async function getPayloadStream(
+  accessToken: string,
+  metaFileId: string
+): Promise<Response> {
+  const payloadFile = await resolvePayloadFile(accessToken, metaFileId);
+  return driveGet(
+    accessToken,
+    `/files/${encodeURIComponent(payloadFile.id)}`,
+    { alt: "media" }
+  );
 }
 
 /**

@@ -12,6 +12,7 @@ import { Separator } from "@/components/ui/separator";
 import type { DecryptedMeta } from "@/types";
 import { Calendar, FileText, HardDrive, Tag, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { FileDownloadButton } from "@/components/file-download-button";
 
 interface MetaDetailModalProps {
   meta: DecryptedMeta | null;
@@ -90,6 +91,19 @@ export function MetaDetailModal({ meta, onClose }: MetaDetailModalProps) {
                 <DialogDescription className="break-all">{details.name}</DialogDescription>
               )}
             </DialogHeader>
+
+            <FileDownloadButton
+              target={{
+                metaFileId: driveFile.id,
+                fallbackName: details.name || originalFileName,
+                expectedSize:
+                  details.extra?.size_bytes !== undefined
+                    ? Number(details.extra.size_bytes)
+                    : Number(driveFile.size),
+              }}
+              showLabel
+              className="w-full justify-center border-emerald-500/25 bg-emerald-600/15 text-emerald-200 hover:border-emerald-400/60 hover:bg-emerald-600/30"
+            />
 
             {/* Description */}
             {details.description && (

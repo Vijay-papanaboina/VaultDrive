@@ -1,20 +1,22 @@
 # Command Line Tools & Selection Export
 
-This document explains the file selection workflow, integration with Rclone for bulk downloads, and the suite of Node.js scripts in the [tools/](file:///mnt/D/Projects/encrypted-gdrive/tools) directory.
+This document explains the browser file-selection/download workflow, integration with Rclone, and the suite of Node.js scripts in the [tools/](file:///mnt/D/Projects/encrypted-gdrive/tools) directory.
 
 ---
 
 ## 1. UI File Selection & Rclone Bulk Download
 
-Because your files are stored in Google Drive as opaque, end-to-end encrypted payloads (named with numeric IDs) alongside `.meta` description sidecars, downloading folders directly via the Google Drive web interface is not feasible. 
+Files are stored in Google Drive as opaque, end-to-end encrypted payloads (named with numeric IDs) alongside `.meta` description sidecars. VaultDrive supports both direct browser downloads and an encrypted-file export workflow.
 
 To download files, VaultDrive provides a bulk-download helper pipeline:
 
 ### Workflow
 1. **Select Files**: Click the **Select Files** button in the [DriveHeader](file:///mnt/D/Projects/encrypted-gdrive/components/drive-header.tsx) to activate selection checkboxes.
 2. **Select Target Files**: Click on individual file cards or use global search to select files across multiple visited folders.
-3. **Download List**: Click **Download List**. This downloads a local file named `files.txt` containing a line-separated list of relative folder paths and Google Drive file IDs.
-4. **Fetch Using Rclone**: An interactive dialog will display the rclone commands to copy the encrypted files to your machine using the downloaded `files.txt`:
+3. **Choose a download mode** from the header:
+   - **Download Original Files** fetches each paired payload, stream-decrypts it in the browser, and saves the plaintext using the filename embedded in the payload. Chromium browsers with File System Access support write chunks directly to disk; other browsers use a Blob fallback. Files are downloaded individually.
+   - **Download File List** downloads a local `files.txt` containing a line-separated list of relative folder paths and numeric payload filenames.
+4. **Fetch Using Rclone** (for the file-list mode): An interactive dialog displays the rclone commands to copy the encrypted files to your machine using the downloaded `files.txt`:
    ```bash
    rclone copy "mygdrive:" ./encrypted-files --files-from files.txt
    ```
@@ -22,7 +24,11 @@ To download files, VaultDrive provides a bulk-download helper pipeline:
    ```bash
    find . -mindepth 1 -type f -exec mv -t . {} +
    ```
-6. **Decrypt Locally**: Run the local decryption utility `decrypt-file.mjs` against the downloaded directory to reconstruct the original filenames and unencrypted file payloads.
+6. **Decrypt Locally** (for the Rclone workflow): Run the local decryption utility `decrypt-file.mjs` against the downloaded directory to reconstruct the original filenames and unencrypted file payloads.
+
+### Individual Card Downloads
+
+Every successfully decrypted card exposes a download icon on hover, and the same action is available in the card detail modal. The browser resolves the matching payload by using the `.meta` Drive file ID, the `.meta` file's parent folder, and the metadata filename without `.meta`. It then stream-decrypts the payload locally and saves the embedded original filename. The navbar's Downloads button shows each file's current stage and byte progress.
 
 ---
 
@@ -57,6 +63,8 @@ node tools/vaultdrive-cli.mjs --keys
 ### B. VaultDrive Decryption Utility
 * **File Path**: [tools/decrypt-file.mjs](file:///mnt/D/Projects/encrypted-gdrive/tools/decrypt-file.mjs)
 * **Purpose**: Decrypts downloaded age-encrypted payloads and `.meta` packages locally using a passphrase, restoring the original filenames and directory hierarchy.
+
+Payload files produced by the packager decrypt to a four-byte big-endian filename length, a UTF-8 filename, and the original file bytes. The browser download path uses the same format and the same derived age identity, but consumes the payload as a stream and writes chunks to the selected destination instead of first creating a complete decrypted output file.
 
 #### Options
 * `--file`, `-f`: Path to a single encrypted payload or `.meta` file.

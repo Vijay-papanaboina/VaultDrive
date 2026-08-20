@@ -163,8 +163,13 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
       const resolvedPath = getRelativePath ? getRelativePath(file) : relativePath;
       toggleFileSelection({
         id: fileId,
+        metaFileId: file.driveFile.id,
         name: file.originalFileName,
         relativePath: resolvedPath,
+        expectedSize:
+          file.details?.extra?.size_bytes !== undefined
+            ? Number(file.details.extra.size_bytes)
+            : Number(file.driveFile.size),
       });
     } else {
       if (file.decrypted && file.details && !file.decryptError) {

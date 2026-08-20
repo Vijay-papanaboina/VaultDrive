@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "VaultDrive — Encrypted Drive Viewer",
   description:
-    "Browse your age-encrypted Google Drive files without ever downloading them. Metadata decrypted entirely in your browser.",
+    "Browse your age-encrypted Google Drive files with metadata and requested file downloads decrypted entirely in your browser.",
   keywords: ["encrypted", "google drive", "age encryption", "privacy", "metadata viewer"],
 };
 

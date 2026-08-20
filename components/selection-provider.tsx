@@ -2,10 +2,12 @@
 
 import React, { createContext, useContext, useState, ReactNode, useCallback } from "react";
 
-interface SelectedFile {
+export interface SelectedFile {
   id: string;
+  metaFileId: string;
   name: string;
   relativePath: string; // relative to root folder
+  expectedSize?: number;
 }
 
 interface SelectionContextValue {

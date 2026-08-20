@@ -4,6 +4,7 @@ import { memo } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { FileDownloadButton } from "@/components/file-download-button";
 import type { ProgressiveMetaFile } from "@/types";
 import {
   Calendar,
@@ -95,6 +96,20 @@ export const MetaCard = memo(
                 <Check className="h-3 w-3 stroke-[3]" />
               </div>
             </div>
+          )}
+
+          {decrypted && !decryptError && (
+            <FileDownloadButton
+              target={{
+                metaFileId: driveFile.id,
+                fallbackName: details?.name ?? originalFileName,
+                expectedSize:
+                  details?.extra?.size_bytes !== undefined
+                    ? Number(details.extra.size_bytes)
+                    : Number(driveFile.size),
+              }}
+              className="absolute right-2.5 top-2.5 z-10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+            />
           )}
 
           {meta.status === "pending" || meta.status === "downloading" ? (

@@ -18,6 +18,7 @@ Because browser clients cannot safely store Google Drive OAuth tokens indefinite
 - `/api/drive/folders/route.ts`: Proxies requests to `lib/google-drive.ts` (`listFolders`). Queries the Google Drive API for folder structures within a specified parent ID.
 - `/api/drive/meta/route.ts`: Queries the list of `.meta` files inside a given parent folder.
 - `/api/drive/meta/[fileId]/route.ts`: Fetches the raw encrypted `.meta` bytes for a specific file, returning `application/octet-stream`.
+- `/api/drive/payload/[metaFileId]/route.ts`: Resolves the payload beside a `.meta` file in the same Drive folder, fetches its raw age-encrypted bytes, and returns them without decrypting.
 - `/api/drive/path/route.ts`: Resolves folder path lineage by walking up the parent tree in Google Drive, returning breadcrumb data.
 
 ## Shared Client Utilities
@@ -36,13 +37,14 @@ The UI is broken down into specific interactive client components ensuring optim
 
 1. `PassphraseGate`: 
    - A modal interface guarding the `/drive` page.
-   - Requires users to enter a valid decryption key.
-   - It stores the derived key in memory without pre-validating. Errors surface naturally later if a file fails to decrypt.
+   - Requires users to enter a passphrase and derives the age identity in memory.
+   - It does not pre-validate the passphrase; errors surface naturally when a file fails to decrypt.
 
 2. `DriveHeader`: 
    - Global navigation header.
    - Contains the global search trigger, breadcrumb navigation, and user session menu.
    - Includes a "Re-enter Key" button allowing users to update their memory passphrase seamlessly.
+   - When files are selected, offers both `files.txt` export and direct original-file downloads.
 
 3. `DriveFileBrowser`:
    - Shared browser shell used by both the normal folder page and recursive search page.
@@ -71,6 +73,10 @@ The UI is broken down into specific interactive client components ensuring optim
    - Shared grid surface for both page modes.
    - Renders a paginated grid of `MetaCard` elements (32 items per page), empty states, error states, and the detail modal.
 
+9. `FileDownloadProvider` and `FileDownloadButton`:
+   - Share single-file and sequential selected-file downloads across cards, detail modals, and the header.
+   - Display resolving, downloading, streaming/decrypting, success, and retry states. Supported browsers write decrypted chunks directly to disk; other browsers use a Blob fallback.
+
 ## Data Hooks
 
 - `useMetaFiles`:
@@ -89,6 +95,7 @@ graph TD
     CryptoProvider --> DriveLayout[app/drive/layout.tsx]
     
     DriveLayout --> SelectionProvider
+    DriveLayout --> FileDownloadProvider
     SelectionProvider --> DriveHeader
     SelectionProvider --> PassphraseGate
     
@@ -113,9 +120,12 @@ graph TD
     DriveFileBrowser --> MetaGrid
     MetaGrid --> MetaCard
     MetaCard --> MetaDetailModal
+    MetaCard --> FileDownloadButton
+    MetaDetailModal --> FileDownloadButton
     
     NextAPI[Next.js API Routes] -.->|Manages Session| AuthProvider
     NextAPI -.->|Fetches Blobs| GoogleDrive[Google Drive API]
     FolderView -.->|Requests Data| NextAPI
     SearchView -.->|Requests Data| NextAPI
+    FileDownloadProvider -.->|Requests encrypted payload| NextAPI
 ```

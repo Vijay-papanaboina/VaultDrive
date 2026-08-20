@@ -2,13 +2,13 @@
 
 A secure, client-side encryption frontend for Google Drive. This project provides a Google Drive-like web interface where your files are stored on Google Drive, but their metadata and contents are fully end-to-end encrypted using `age-encryption`.
 
-All sensitive cryptographic operations—including passphrase validation and data decryption—occur strictly client-side in the browser. The Next.js backend serves merely as a secure proxy to fetch data from the Google Drive API, ensuring the server never sees your unencrypted data or your encryption key.
+All sensitive cryptographic operations—including passphrase-derived key creation and data decryption—occur strictly client-side in the browser. The Next.js backend serves merely as a secure proxy to fetch encrypted data from the Google Drive API, ensuring the server never sees your unencrypted data or your encryption key.
 
 ## Core Features
 
 - **Google Drive Storage Backend**: Authenticate via Google OAuth to use your existing Google Drive as the storage layer for your encrypted vault.
 - **End-to-End Encryption**: Files and their metadata (stored as `.meta` zip archives in Google Drive) are encrypted using `age-encryption`. The passphrase you provide never leaves your browser; it derives an in-memory X25519 identity key.
-- **Passphrase Gating**: A secure modal blocks access until a valid key is provided, preventing unauthorized local access while allowing seamless key re-entry without breaking session state.
+- **Passphrase Gating**: A secure modal blocks access until a passphrase is entered. The passphrase derives an in-memory age identity; it is not pre-validated, and incorrect-key errors surface when metadata or payloads are decrypted.
 - **Global, Local, and Recursive Search**:
   - **In-Folder Search**: Real-time filtering within the current directory with space-insensitive matching.
   - **Recursive Folder Search**: Open any folder in recursive search mode to crawl its subfolders, aggregate `.meta` files, and browse the entire subtree in one view.
@@ -18,6 +18,7 @@ All sensitive cryptographic operations—including passphrase validation and dat
   - Local search and sort use a dedicated browser worker so large decrypted folders stay responsive during reordering and filtering, with search inputs debounced (350ms) to avoid redundant computations.
   - File grids utilize a paginated layout (32 items per page) with responsive pagination controls to avoid DOM overload and ensure rapid rendering.
 - **Rclone Selection & Export**: Select specific files to export an ID list and fetch your raw encrypted data from Google Drive using Rclone command-line utilities.
+- **Browser Downloads**: From the selection toolbar, choose between exporting `files.txt` or fetching, decrypting, and saving the selected original files directly in the browser. Every decrypted card also has an individual download action.
 - **Modern UI/UX**: Built with Tailwind CSS v4 and Base UI, featuring custom scrollbars, micro-animations, and a highly polished dark mode.
 
 ## Tech Stack
@@ -37,7 +38,7 @@ For an in-depth look at how the system maintains zero-knowledge privacy while in
 
 1. [Architecture & Decryption Flow](./docs/architecture.md) - Learn about the Google Drive proxy layer, client-side decryption pipeline, shared browser shell, and recursive search flow.
 2. [Routes & Components](./docs/routes.md) - Understand the Next.js API endpoints, shared view components, and page-specific wiring.
-3. [CLI Tools & Selection Export](./docs/tools.md) - Details on Rclone bulk downloading, folder-flattening, and the local Node.js decryption/packaging script tools.
+3. [CLI Tools & Selection Export](./docs/tools.md) - Details on browser downloads, Rclone export, folder-flattening, and the local Node.js decryption/packaging script tools.
 
 ## Getting Started
 
