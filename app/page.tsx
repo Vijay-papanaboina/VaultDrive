@@ -47,7 +47,7 @@ const features = [
     icon: Eye,
     title: "Metadata First",
     description:
-      "Browsing fetches lightweight .meta sidecar files. Original-file downloads fetch encrypted payloads only when you request them, then decrypt them in your browser.",
+      "Browsing fetches lightweight .meta sidecar files. You can edit and save their encrypted details and thumbnails without changing the original payload files.",
   },
   {
     icon: FolderKey,
@@ -140,7 +140,7 @@ export default function HomePage() {
               Connect your Drive
             </h2>
             <p className="text-sm text-muted-foreground">
-              Read-only access. We never modify or delete your files.
+              We update only encrypted metadata sidecars. Original payload files are never modified.
             </p>
           </div>
 
@@ -167,7 +167,7 @@ export default function HomePage() {
           </Button>
 
           <p className="mt-4 text-center text-xs text-muted-foreground">
-            Requests <code className="text-white/60">drive.readonly</code> scope
+            Requests <code className="text-white/60">drive</code> scope for reading and saving encrypted metadata
             only. Your passphrase is never sent anywhere.
           </p>
         </div>

@@ -125,17 +125,23 @@ function PaginationControls({ page, totalPages, startIndex, endIndex, totalFiles
 
 export function MetaGrid({ files, isLoading, error, relativePath, getRelativePath }: MetaGridProps) {
   const [selected, setSelected] = useState<DecryptedMeta | null>(null);
+  const [savedOverrides, setSavedOverrides] = useState<Record<string, ProgressiveMetaFile>>({});
   const [page, setPage] = useState(1);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const { clearPassphrase } = useCrypto();
   const { isSelectionMode, isFileSelected, toggleFileSelection } = useSelection();
 
+  const displayedFiles = useMemo(
+    () => files.map((file) => savedOverrides[file.driveFile.id] ?? file),
+    [files, savedOverrides]
+  );
+
   // Detect when the file set identity changes (sort/filter/search changes the head IDs or count).
   // replaceMetaFile keeps IDs/order/length stable during decryption, so this only fires on real set changes.
   const filesKey = useMemo(() => {
-    const head = files.slice(0, 4).map((f) => f.driveFile.id).join("|");
-    return `${files.length}::${head}`;
-  }, [files]);
+    const head = displayedFiles.slice(0, 4).map((f) => f.driveFile.id).join("|");
+    return `${displayedFiles.length}::${head}`;
+  }, [displayedFiles]);
 
   // Reset page during render when the file set changes (React's recommended pattern for
   // adjusting state on prop change — avoids the extra render cycle of useEffect).
@@ -146,11 +152,11 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
     setPage(1);
   }
 
-  const totalPages = Math.max(1, Math.ceil(files.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(displayedFiles.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
   const startIndex = (safePage - 1) * PAGE_SIZE;
-  const endIndex = Math.min(startIndex + PAGE_SIZE, files.length);
-  const pagedFiles = files.slice(startIndex, endIndex);
+  const endIndex = Math.min(startIndex + PAGE_SIZE, displayedFiles.length);
+  const pagedFiles = displayedFiles.slice(startIndex, endIndex);
 
   function handlePageChange(nextPage: number) {
     setPage(nextPage);
@@ -176,6 +182,8 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
         setSelected({
           driveFile: file.driveFile,
           details: file.details,
+          thumbnailBytes: file.thumbnailBytes ?? null,
+          thumbnailFilename: file.thumbnailFilename ?? null,
           thumbnailUrl: file.thumbnailUrl ?? null,
           thumbnailMimeType: file.thumbnailMimeType ?? null,
           originalFileName: file.originalFileName,
@@ -240,7 +248,7 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
     );
   }
 
-  if (files.length === 0) {
+  if (displayedFiles.length === 0) {
     return (
       <div className="flex flex-col items-center gap-3 rounded-xl border border-white/8 bg-white/3 py-16 text-center">
         <FileX className="h-10 w-10 text-muted-foreground/40" />
@@ -276,13 +284,30 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
         totalPages={totalPages}
         startIndex={startIndex}
         endIndex={endIndex}
-        totalFiles={files.length}
+        totalFiles={displayedFiles.length}
         onChange={handlePageChange}
       />
 
       <MetaDetailModal
         meta={selected}
         onClose={() => setSelected(null)}
+        onSaved={(next) => {
+          setSavedOverrides((previous) => ({
+            ...previous,
+            [next.driveFile.id]: {
+              driveFile: next.driveFile,
+              originalFileName: next.originalFileName,
+              decrypted: true,
+              status: "decrypted",
+              details: next.details,
+              thumbnailBytes: next.thumbnailBytes,
+              thumbnailFilename: next.thumbnailFilename,
+              thumbnailMimeType: next.thumbnailMimeType,
+              thumbnailUrl: next.thumbnailUrl,
+            },
+          }));
+          setSelected(next);
+        }}
       />
     </>
   );

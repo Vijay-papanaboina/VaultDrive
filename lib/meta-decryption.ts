@@ -8,6 +8,7 @@ export interface WorkerDecryptResult {
   result?: {
     details: MetaDetails;
     thumbnailBytes?: Uint8Array | null;
+    thumbnailFilename?: string | null;
     thumbnailMimeType?: string | null;
   };
   error?: string;
@@ -54,7 +55,8 @@ export function createResolvedMetaFile(
       decrypted: true,
       status: "decrypted",
       details: decrypted.result.details,
-      thumbnailBytes: null,
+      thumbnailBytes: decrypted.result.thumbnailBytes ?? null,
+      thumbnailFilename: decrypted.result.thumbnailFilename ?? null,
       thumbnailMimeType: decrypted.result.thumbnailMimeType ?? null,
       thumbnailUrl,
     };

@@ -1,6 +1,17 @@
 import type { DriveFolder, DriveMetaFile, BreadcrumbItem, DriveListResponse } from "@/types";
 
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
+const DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
+
+export class DriveApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number
+  ) {
+    super(message);
+    this.name = "DriveApiError";
+  }
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -97,6 +108,64 @@ export async function getFileContent(
   const res = await driveGet(accessToken, `/files/${encodeURIComponent(fileId)}`, { alt: "media" });
   const buffer = await res.arrayBuffer();
   return new Uint8Array(buffer);
+}
+
+/**
+ * Replace only the binary content of an existing Drive file. Drive metadata
+ * such as its name and parents is intentionally not sent in this request.
+ */
+export async function updateFileContent(
+  accessToken: string,
+  fileId: string,
+  content: Uint8Array,
+  expectedModifiedTime?: string
+): Promise<DriveMetaFile> {
+  const currentRes = await driveGet(
+    accessToken,
+    `/files/${encodeURIComponent(fileId)}`,
+    { fields: "id,name,size,modifiedTime,createdTime" }
+  );
+  const current = (await currentRes.json()) as DriveMetaFile;
+
+  if (!/\.meta$/i.test(current.name)) {
+    throw new DriveApiError("The requested file is not a metadata file", 400);
+  }
+
+  if (
+    expectedModifiedTime &&
+    current.modifiedTime &&
+    current.modifiedTime !== expectedModifiedTime
+  ) {
+    throw new DriveApiError(
+      "This metadata file changed in Drive while it was being edited",
+      409
+    );
+  }
+
+  const url = new URL(`${DRIVE_UPLOAD_API}/files/${encodeURIComponent(fileId)}`);
+  url.searchParams.set("uploadType", "media");
+  url.searchParams.set("fields", "id,name,size,modifiedTime,createdTime");
+
+  const response = await fetch(url.toString(), {
+    method: "PATCH",
+    headers: {
+      ...authHeaders(accessToken),
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(content.byteLength),
+    },
+    body: content.buffer as ArrayBuffer,
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new DriveApiError(
+      `Drive content update failed (${response.status}): ${body}`,
+      response.status
+    );
+  }
+
+  return (await response.json()) as DriveMetaFile;
 }
 
 async function resolvePayloadFile(

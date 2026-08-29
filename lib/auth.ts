@@ -13,7 +13,9 @@ export const auth = betterAuth({
         "openid",
         "email",
         "profile",
-        "https://www.googleapis.com/auth/drive.readonly",
+        // Editing the existing CLI-created vault files requires write access
+        // to files that were not necessarily created by this web app.
+        "https://www.googleapis.com/auth/drive",
       ],
       accessType: "offline",
       prompt: "consent",

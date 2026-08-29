@@ -34,9 +34,11 @@ export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
   const { isSelectionMode, isFileSelected, toggleFileSelection } = useSelection();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedDetail, setSelectedDetail] = useState<DecryptedMeta | null>(null);
+  const [, setMetadataRevision] = useState(0);
 
-  // 1. Gather all files from the React Query cache
-  const allFiles = useMemo(() => {
+  // 1. Gather all files from the React Query cache. This intentionally runs
+  // on each render so metadataRevision reflects a successful save immediately.
+  const allFiles = (() => {
     if (!isOpen) return [];
 
     const cacheData = queryClient.getQueriesData<ProgressiveMetaFile[]>({
@@ -70,7 +72,7 @@ export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
     });
 
     return filesList;
-  }, [isOpen, queryClient]);
+  })();
 
   // 2. Set up Fuse.js for fuzzy search
   const fuse = useMemo(() => {
@@ -106,6 +108,8 @@ export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
         setSelectedDetail({
           driveFile: file.driveFile,
           details: file.details,
+          thumbnailBytes: file.thumbnailBytes ?? null,
+          thumbnailFilename: file.thumbnailFilename ?? null,
           thumbnailUrl: file.thumbnailUrl ?? null,
           thumbnailMimeType: file.thumbnailMimeType ?? null,
           originalFileName: file.originalFileName,
@@ -206,6 +210,10 @@ export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
       <MetaDetailModal
         meta={selectedDetail}
         onClose={() => setSelectedDetail(null)}
+        onSaved={(next) => {
+          setSelectedDetail(next);
+          setMetadataRevision((revision) => revision + 1);
+        }}
       />
     </>
   );

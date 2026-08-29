@@ -19,6 +19,7 @@ All sensitive cryptographic operations—including passphrase-derived key creati
   - File grids utilize a paginated layout (32 items per page) with responsive pagination controls to avoid DOM overload and ensure rapid rendering.
 - **Rclone Selection & Export**: Select specific files to export an ID list and fetch your raw encrypted data from Google Drive using Rclone command-line utilities.
 - **Browser Downloads**: From the selection toolbar, choose between exporting `files.txt` or fetching, decrypting, and saving the selected original files directly in the browser. Every decrypted card also has an individual download action.
+- **Encrypted Metadata Editing**: Edit the fields stored in `details.json` and replace or remove the thumbnail from a decrypted card, then re-zip, re-encrypt, and update the same `.meta` file in Google Drive. Original payload files and Drive filenames are never changed.
 - **Modern UI/UX**: Built with Tailwind CSS v4 and Base UI, featuring custom scrollbars, micro-animations, and a highly polished dark mode.
 
 ## Tech Stack
@@ -57,7 +58,7 @@ For an in-depth look at how the system maintains zero-knowledge privacy while in
    AUTH_GOOGLE_ID=your_google_oauth_client_id
    AUTH_GOOGLE_SECRET=your_google_oauth_client_secret
    ```
-   Ensure your Google OAuth application has the `https://www.googleapis.com/auth/drive.readonly` scope enabled.
+   Ensure your Google OAuth application has the `https://www.googleapis.com/auth/drive` scope enabled. Existing users must sign in again after this scope changes so Google can issue a write-enabled token.
 
 3. **Run the Development Server**:
    ```bash

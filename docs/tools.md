@@ -30,6 +30,12 @@ To download files, VaultDrive provides a bulk-download helper pipeline:
 
 Every successfully decrypted card exposes a download icon on hover, and the same action is available in the card detail modal. The browser resolves the matching payload by using the `.meta` Drive file ID, the `.meta` file's parent folder, and the metadata filename without `.meta`. It then stream-decrypts the payload locally and saves the embedded original filename. The navbar's Downloads button shows each file's current stage and byte progress.
 
+## Editing metadata
+
+Open a decrypted card and choose **Edit** to change the fields stored in `details.json` (`name`, `description`, `date`, and `extra`) or replace/remove its thumbnail. The browser rebuilds and age-encrypts the metadata ZIP, then sends the ciphertext to `PUT /api/drive/meta/{fileId}`. Only the existing `.meta` file content is replaced; the paired encrypted original payload, Drive filename, parent folder, and other Drive metadata are not changed.
+
+The web OAuth configuration uses Drive write access so the authenticated server proxy can update existing vault sidecars. Users with an older read-only session must sign in again to grant the new permission.
+
 ---
 
 ## 2. CLI Tools Suite

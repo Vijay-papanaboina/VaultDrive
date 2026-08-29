@@ -166,7 +166,7 @@ export function UserMenu() {
           <DropdownMenuSeparator />
           <DropdownMenuItem className="gap-2 text-muted-foreground" disabled>
             <Shield className="h-3.5 w-3.5" />
-            drive.readonly access
+            Drive access for encrypted metadata saves
           </DropdownMenuItem>
           {identity && (
             <>

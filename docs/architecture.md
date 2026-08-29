@@ -5,7 +5,7 @@ The Encrypted GDrive project acts as a secure, zero-knowledge overlay on top of 
 ## High-Level Architecture
 
 1. **Frontend (Client-Side)**: React 19 application running in the browser. It handles state management, local/recursive/global search, and strictly executes all cryptographic operations (`age-encryption` and `fflate`) in memory.
-2. **Backend (Proxy/Auth Layer)**: Next.js API Routes. It manages OAuth sessions using Better Auth (persisting session data locally in SQLite) and acts as a secure proxy. It attaches the user's Google Drive OAuth token to fetch encrypted blobs from the Google Drive API.
+2. **Backend (Proxy/Auth Layer)**: Next.js API Routes. It manages OAuth sessions using Better Auth (persisting session data locally in SQLite) and acts as a secure proxy. It attaches the user's Google Drive OAuth token to fetch and replace encrypted blobs in the Google Drive API.
 3. **Storage Layer (Google Drive API)**: The actual Google Drive servers where files are stored. The data stored here consists of opaque folders, numbered age-encrypted payloads, and `.meta` files (age-encrypted metadata zip archives). A payload is paired with a `.meta` file by sharing its folder and using the `.meta` filename without the final suffix.
 
 ## Shared Client Architecture
@@ -17,6 +17,7 @@ The current frontend separates page-specific data discovery from shared file-bro
 3. **Prompt Handling**: `components/decryption-error-dialog.tsx` and `hooks/use-decryption-error-prompt.ts` own the wrong-passphrase / stop / re-enter flow for both normal and recursive pages.
 4. **Decryption Helpers**: `lib/meta-decryption.ts` centralizes the shared worker/decrypt/update helpers used by `useMetaFiles` and `useRecursiveMetaFiles`.
 5. **Download Pipeline**: `components/file-download-provider.tsx` resolves encrypted payloads through the authenticated API, passes the response body through age stream decryption, validates the small CLI-compatible filename header, and writes plaintext chunks directly to disk when the browser supports the File System Access API.
+6. **Metadata Edit Pipeline**: `MetaDetailModal` edits the in-memory `details.json` object and thumbnail bytes, `lib/crypto.ts` creates a new ZIP and age ciphertext in the browser, and `PUT /api/drive/meta/[fileId]` replaces only the existing `.meta` file content through the authenticated Drive API.
 
 ## Data Flow: Google OAuth to Decryption
 
@@ -65,6 +66,14 @@ sequenceDiagram
     
     Client (React)-->>User: Render Decrypted File Cards
 
+    User->>Client (React): Edit details.json fields or replace thumbnail
+    Client (React)->>Client (React): Rebuild ZIP and age-encrypt with identityRef
+    Client (React)->>Next.js API: PUT encrypted .meta bytes
+    Next.js API->>Google Drive API: PATCH existing .meta content only
+    Google Drive API-->>Next.js API: Updated file timestamps and size
+    Next.js API-->>Client (React): Updated Drive file record
+    Client (React)-->>User: Refresh edited card and thumbnail
+
     User->>Client (React): Click Download on a card or selected-file action
     Client (React)->>Next.js API: Request paired payload using meta file ID
     Next.js API->>Google Drive API: Resolve same-parent filename without .meta, then GET payload
@@ -76,6 +85,8 @@ sequenceDiagram
 
 ## Security Guarantees
 - The passphrase is never transmitted to the server or Google Drive.
+- Metadata saves send only age-encrypted `.meta` bytes to the server. The server never receives plaintext `details.json`, thumbnail bytes, or the derived identity.
+- Metadata saves update the existing `.meta` file's content only. The paired original payload and all Google Drive file naming/parent metadata remain untouched.
 - The `identityRef` derived from the passphrase is held strictly in memory and clears on reload or when the key is explicitly replaced or cleared.
 - The `.meta` blobs and payloads stored in Google Drive are completely opaque. Metadata is a zip containing JSON and thumbnails, while payloads contain a filename header and file bytes; both are encrypted using `age-encryption`.
 - Original-file downloads fetch encrypted payload bytes through the server proxy, but age decryption, filename parsing, and plaintext Blob creation all happen in the browser. Plaintext is not sent back to the server.

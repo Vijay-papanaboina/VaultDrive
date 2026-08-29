@@ -31,3 +31,29 @@ export async function fetchMetaList(folderId: string, bypassCache = false): Prom
   const data = await res.json();
   return data.files as DriveMetaFile[];
 }
+
+export async function updateMetaFile(
+  fileId: string,
+  encryptedBytes: Uint8Array,
+  expectedModifiedTime?: string
+): Promise<DriveMetaFile> {
+  const headers: HeadersInit = {
+    "Content-Type": "application/octet-stream",
+  };
+  if (expectedModifiedTime) {
+    headers["If-Unmodified-Since"] = expectedModifiedTime;
+  }
+
+  const res = await fetch(`/api/drive/meta/${encodeURIComponent(fileId)}`, {
+    method: "PUT",
+    headers,
+    body: encryptedBytes.buffer as ArrayBuffer,
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const message = await res.text();
+    throw new Error(message || `Failed to update metadata file: HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  return data.file as DriveMetaFile;
+}

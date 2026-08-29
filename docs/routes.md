@@ -17,7 +17,7 @@ Because browser clients cannot safely store Google Drive OAuth tokens indefinite
 - `/api/auth/[...all]/route.ts`: Better Auth endpoints managing Google OAuth, session cookies, and local database connections.
 - `/api/drive/folders/route.ts`: Proxies requests to `lib/google-drive.ts` (`listFolders`). Queries the Google Drive API for folder structures within a specified parent ID.
 - `/api/drive/meta/route.ts`: Queries the list of `.meta` files inside a given parent folder.
-- `/api/drive/meta/[fileId]/route.ts`: Fetches the raw encrypted `.meta` bytes for a specific file, returning `application/octet-stream`.
+- `/api/drive/meta/[fileId]/route.ts`: `GET` fetches raw encrypted `.meta` bytes. `PUT` accepts an already encrypted `application/octet-stream` body and replaces only that Drive file's content after checking the optional `If-Unmodified-Since` value.
 - `/api/drive/payload/[metaFileId]/route.ts`: Resolves the payload beside a `.meta` file in the same Drive folder, fetches its raw age-encrypted bytes, and returns them without decrypting.
 - `/api/drive/path/route.ts`: Resolves folder path lineage by walking up the parent tree in Google Drive, returning breadcrumb data.
 
@@ -28,6 +28,7 @@ Several client-side helpers are now shared across both the normal folder view an
 - `lib/drive-client.ts`: Shared `fetchBreadcrumbs`, `fetchSubfolders`, and `fetchMetaList` helpers used by page hooks/components.
 - `lib/drive-path.ts`: Shared breadcrumb-to-relative-path formatter.
 - `lib/meta-decryption.ts`: Shared worker/decrypt/cache-update helpers used by both decryption hooks.
+- `lib/crypto.ts`: Decrypts metadata archives and rebuilds/encrypts edited `details.json` plus the thumbnail entirely in the browser.
 - `hooks/use-drive-file-browser-state.ts`: Shared inline search and sort state for the file browser shell.
 - `hooks/use-decryption-error-prompt.ts`: Shared modal-open / dismiss / stop / re-enter behavior for decryption failures.
 
@@ -76,6 +77,10 @@ The UI is broken down into specific interactive client components ensuring optim
 9. `FileDownloadProvider` and `FileDownloadButton`:
    - Share single-file and sequential selected-file downloads across cards, detail modals, and the header.
    - Display resolving, downloading, streaming/decrypting, success, and retry states. Supported browsers write decrypted chunks directly to disk; other browsers use a Blob fallback.
+
+10. `MetaDetailModal`:
+   - Displays decrypted metadata and provides an edit mode for all current `details.json` fields plus thumbnail replacement/removal.
+   - Uploads only the new encrypted `.meta` bytes; it never renames or updates the paired original payload.
 
 ## Data Hooks
 

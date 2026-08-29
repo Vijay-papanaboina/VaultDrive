@@ -1,12 +1,12 @@
 "use client";
 
-import { Decrypter } from "age-encryption";
-import { unzipSync } from "fflate";
+import { Decrypter, Encrypter, identityToRecipient } from "age-encryption";
+import { unzipSync, zipSync } from "fflate";
 import { bech32 } from "@scure/base";
 import type { MetaDetails } from "@/types";
 import { argon2id } from "hash-wasm";
 
-const IMAGE_EXTS = /\.(webp|jpg|jpeg|png|gif|avif|bmp|svg)$/i;
+export const IMAGE_EXTS = /\.(webp|jpg|jpeg|png|gif|avif|bmp|svg)$/i;
 
 function getMimeType(filename: string): string {
   const ext = filename.split(".").pop()?.toLowerCase() ?? "";
@@ -26,7 +26,14 @@ function getMimeType(filename: string): string {
 export interface DecryptedZipResult {
   details: MetaDetails;
   thumbnailBytes: Uint8Array | null;
+  thumbnailFilename: string | null;
   thumbnailMimeType: string | null;
+}
+
+export interface MetaArchiveInput {
+  details: MetaDetails;
+  thumbnailBytes: Uint8Array | null;
+  thumbnailFilename: string | null;
 }
 
 export interface DecryptedPayloadStreamResult {
@@ -119,14 +126,47 @@ export async function decryptMetaZip(
     ([name]) => name !== "details.json" && IMAGE_EXTS.test(name)
   );
   let thumbnailBytes: Uint8Array | null = null;
+  let thumbnailFilename: string | null = null;
   let thumbnailMimeType: string | null = null;
   if (thumbEntry) {
     const [thumbName, thumbBytes] = thumbEntry;
     thumbnailBytes = thumbBytes;
+    thumbnailFilename = thumbName;
     thumbnailMimeType = getMimeType(thumbName);
   }
 
-  return { details, thumbnailBytes, thumbnailMimeType };
+  return { details, thumbnailBytes, thumbnailFilename, thumbnailMimeType };
+}
+
+function safeArchiveFilename(filename: string): string {
+  const normalized = filename
+    .replace(/[\\/]/g, "_")
+    .replace(/[\u0000-\u001f\u007f]/g, "_")
+    .trim();
+  if (!normalized || normalized === "." || normalized === ".." || !IMAGE_EXTS.test(normalized)) {
+    return "thumbnail.webp";
+  }
+  return normalized;
+}
+
+/** Build and age-encrypt the metadata ZIP in the browser. */
+export async function encryptMetaZip(
+  identity: string,
+  input: MetaArchiveInput
+): Promise<Uint8Array> {
+  const archive: Record<string, Uint8Array> = {
+    "details.json": new TextEncoder().encode(JSON.stringify(input.details, null, 2)),
+  };
+
+  if (input.thumbnailBytes && input.thumbnailFilename) {
+    archive[safeArchiveFilename(input.thumbnailFilename)] = input.thumbnailBytes;
+  }
+
+  const zipBytes = zipSync(archive, { level: 0 });
+  const recipient = await identityToRecipient(identity);
+  const encrypter = new Encrypter();
+  encrypter.addRecipient(recipient);
+  return encrypter.encrypt(zipBytes);
 }
 
 /**
