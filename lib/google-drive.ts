@@ -168,6 +168,157 @@ export async function updateFileContent(
   return (await response.json()) as DriveMetaFile;
 }
 
+function driveUploadUrl(path: string, params: Record<string, string> = {}): string {
+  const url = new URL(`${DRIVE_UPLOAD_API}${path}`);
+  Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
+  return url.toString();
+}
+
+function randomOpaqueNumericId(): string {
+  // Keep the CLI's numeric-looking pairing convention without leaking a real name.
+  const bytes = crypto.getRandomValues(new Uint32Array(2));
+  const high = 1000000 + (bytes[0] % 9000000);
+  const low = String(bytes[1] % 100000000).padStart(8, "0");
+  return `${high}${low}`;
+}
+
+async function createDriveFile(
+  accessToken: string,
+  metadata: Record<string, unknown>
+): Promise<{ id: string; name: string; parents?: string[] }> {
+  const response = await fetch(`${DRIVE_API}/files?fields=id,name,parents`, {
+    method: "POST",
+    headers: { ...authHeaders(accessToken), "Content-Type": "application/json" },
+    body: JSON.stringify(metadata),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new DriveApiError(`Drive file creation failed (${response.status}): ${await response.text()}`, response.status);
+  }
+  return response.json();
+}
+
+export interface CreatedUploadMeta {
+  metaFile: DriveMetaFile;
+  opaqueId: string;
+}
+
+/** Create the encrypted .meta sidecar first, under an opaque numeric name. */
+export async function createMetaUpload(
+  accessToken: string,
+  folderId: string,
+  encryptedMeta: Uint8Array
+): Promise<CreatedUploadMeta> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const opaqueId = randomOpaqueNumericId();
+    const metaName = `${opaqueId}.meta`;
+    const existing = await listAll(
+      accessToken,
+      `'${escapeDriveQueryValue(folderId)}' in parents and name = '${metaName}' and trashed = false`,
+      "id"
+    );
+    if (existing.length) continue;
+
+    const boundary = `vaultdrive-${crypto.randomUUID()}`;
+    const body = new Blob([
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`,
+      JSON.stringify({ name: metaName, parents: [folderId], mimeType: "application/octet-stream" }),
+      `\r\n--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`,
+      encryptedMeta.buffer.slice(encryptedMeta.byteOffset, encryptedMeta.byteOffset + encryptedMeta.byteLength) as ArrayBuffer,
+      `\r\n--${boundary}--`,
+    ]);
+    const response = await fetch(driveUploadUrl("/files", {
+      uploadType: "multipart", fields: "id,name,size,modifiedTime,createdTime",
+    }), {
+      method: "POST",
+      headers: { ...authHeaders(accessToken), "Content-Type": `multipart/related; boundary=${boundary}` },
+      body,
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw new DriveApiError(`Drive metadata upload failed (${response.status}): ${await response.text()}`, response.status);
+    }
+    return { metaFile: await response.json() as DriveMetaFile, opaqueId };
+  }
+  throw new DriveApiError("Could not allocate a unique opaque file ID", 409);
+}
+
+export interface PayloadUploadSession {
+  payloadFileId: string;
+  sessionUrl: string;
+}
+
+/**
+ * Create an opaque temporary payload and its Drive resumable-upload session.
+ * The final name is applied only after all ciphertext is present.
+ */
+export async function createPayloadUploadSession(
+  accessToken: string,
+  metaFileId: string,
+  encryptedSize: number
+): Promise<PayloadUploadSession> {
+  const metaRes = await driveGet(accessToken, `/files/${encodeURIComponent(metaFileId)}`, { fields: "id,name,parents" });
+  const meta = await metaRes.json() as { name: string; parents?: string[] };
+  if (!/^[0-9]+\.meta$/i.test(meta.name) || !meta.parents?.[0]) {
+    throw new DriveApiError("The metadata file is not a VaultDrive upload sidecar", 400);
+  }
+  const opaqueId = meta.name.replace(/\.meta$/i, "");
+  const payload = await createDriveFile(accessToken, {
+    name: `${opaqueId}.uploading`, parents: [meta.parents[0]], mimeType: "application/octet-stream",
+  });
+  const response = await fetch(driveUploadUrl(`/files/${encodeURIComponent(payload.id)}`, { uploadType: "resumable" }), {
+    method: "PATCH",
+    headers: {
+      ...authHeaders(accessToken),
+      "X-Upload-Content-Type": "application/octet-stream",
+      "X-Upload-Content-Length": String(encryptedSize),
+      "Content-Length": "0",
+    },
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new DriveApiError(`Drive resumable upload setup failed (${response.status}): ${await response.text()}`, response.status);
+  }
+  const sessionUrl = response.headers.get("location");
+  if (!sessionUrl) throw new DriveApiError("Drive did not return a resumable upload URL", 502);
+  return { payloadFileId: payload.id, sessionUrl };
+}
+
+export async function completePayloadUpload(
+  accessToken: string,
+  metaFileId: string,
+  payloadFileId: string
+): Promise<DriveMetaFile> {
+  const metaRes = await driveGet(accessToken, `/files/${encodeURIComponent(metaFileId)}`, { fields: "name,parents" });
+  const meta = await metaRes.json() as { name: string; parents?: string[] };
+  const payloadRes = await driveGet(accessToken, `/files/${encodeURIComponent(payloadFileId)}`, { fields: "id,name,parents,size,modifiedTime,createdTime" });
+  const payload = await payloadRes.json() as DriveMetaFile & { parents?: string[] };
+  const finalName = meta.name.replace(/\.meta$/i, "");
+  if (!/^[0-9]+\.meta$/i.test(meta.name) || payload.name !== `${finalName}.uploading` || payload.parents?.[0] !== meta.parents?.[0]) {
+    throw new DriveApiError("Payload does not belong to this metadata sidecar", 400);
+  }
+  const response = await fetch(`${DRIVE_API}/files/${encodeURIComponent(payloadFileId)}?fields=id,name,size,modifiedTime,createdTime`, {
+    method: "PATCH",
+    headers: { ...authHeaders(accessToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ name: finalName }),
+    cache: "no-store",
+  });
+  if (!response.ok) throw new DriveApiError(`Drive payload finalization failed (${response.status}): ${await response.text()}`, response.status);
+  return response.json();
+}
+
+export async function deleteUploadPair(
+  accessToken: string,
+  metaFileId: string,
+  payloadFileId?: string
+): Promise<void> {
+  const ids = [metaFileId, payloadFileId].filter((id): id is string => Boolean(id));
+  await Promise.all(ids.map(async (id) => {
+    const response = await fetch(`${DRIVE_API}/files/${encodeURIComponent(id)}`, { method: "DELETE", headers: authHeaders(accessToken), cache: "no-store" });
+    if (!response.ok && response.status !== 404) throw new DriveApiError(`Drive upload cleanup failed (${response.status})`, response.status);
+  }));
+}
+
 async function resolvePayloadFile(
   accessToken: string,
   metaFileId: string

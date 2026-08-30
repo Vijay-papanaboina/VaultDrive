@@ -3,6 +3,7 @@ import { PassphraseGate } from "@/components/passphrase-gate";
 import { SelectionProvider } from "@/components/selection-provider";
 import { DriveHeader } from "@/components/drive-header";
 import { FileDownloadProvider } from "@/components/file-download-provider";
+import { FileUploadProvider } from "@/components/file-upload-provider";
 
 export const metadata: Metadata = {
   title: "VaultDrive — My Drive",
@@ -17,6 +18,7 @@ export default function DriveLayout({
   return (
     <SelectionProvider>
       <FileDownloadProvider>
+        <FileUploadProvider>
         <div className="flex min-h-screen flex-col">
           {/* Top header */}
           <DriveHeader />
@@ -28,6 +30,7 @@ export default function DriveLayout({
             </main>
           </PassphraseGate>
         </div>
+        </FileUploadProvider>
       </FileDownloadProvider>
     </SelectionProvider>
   );

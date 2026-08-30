@@ -18,6 +18,7 @@ The current frontend separates page-specific data discovery from shared file-bro
 4. **Decryption Helpers**: `lib/meta-decryption.ts` centralizes the shared worker/decrypt/update helpers used by `useMetaFiles` and `useRecursiveMetaFiles`.
 5. **Download Pipeline**: `components/file-download-provider.tsx` resolves encrypted payloads through the authenticated API, passes the response body through age stream decryption, validates the small CLI-compatible filename header, and writes plaintext chunks directly to disk when the browser supports the File System Access API.
 6. **Metadata Edit Pipeline**: `MetaDetailModal` edits the in-memory `details.json` object and thumbnail bytes, `lib/crypto.ts` creates a new ZIP and age ciphertext in the browser, and `PUT /api/drive/meta/[fileId]` replaces only the existing `.meta` file content through the authenticated Drive API.
+7. **Upload Pipeline**: `UploadModal` creates the small encrypted `.meta` sidecar first. The original is then read from `File.slice()` in bounded chunks, given the same CLI filename header, age-encrypted locally, and sent with a Drive resumable upload. Drive sees only opaque numeric `<id>.meta` and `<id>` names.
 
 ## Data Flow: Google OAuth to Decryption
 

@@ -9,7 +9,9 @@ import { DecryptionErrorDialog } from "@/components/decryption-error-dialog";
 import { DriveFileBrowser } from "@/components/drive-file-browser";
 import FolderLoading from "@/app/drive/[folderId]/loading";
 import type { DriveFolder, BreadcrumbItem } from "@/types";
-import { Folder } from "lucide-react";
+import { Folder, Upload } from "lucide-react";
+import { useState } from "react";
+import { UploadModal } from "@/components/upload-modal";
 import { fetchBreadcrumbs, fetchSubfolders } from "@/lib/drive-client";
 import { breadcrumbsToRelativePath } from "@/lib/drive-path";
 import { useDecryptionErrorPrompt } from "@/hooks/use-decryption-error-prompt";
@@ -19,6 +21,7 @@ interface FolderViewProps {
 }
 
 export function FolderView({ folderId }: FolderViewProps) {
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
   const {
     clearPassphrase,
     dismissedPassphraseError,
@@ -94,6 +97,15 @@ export function FolderView({ folderId }: FolderViewProps) {
       <DriveFileBrowser
         folderId={folderId}
         heading="Files"
+        headingAccessory={
+          <button
+            type="button"
+            onClick={() => setIsUploadOpen(true)}
+            className="ml-1 flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-medium text-emerald-300 transition-colors hover:border-emerald-400/60 hover:bg-emerald-500/20"
+          >
+            <Upload className="h-3.5 w-3.5" />Upload
+          </button>
+        }
         files={files}
         isListLoading={isListLoading}
         isDecrypting={isDecrypting}
@@ -112,6 +124,12 @@ export function FolderView({ folderId }: FolderViewProps) {
         onCancel={decryptPrompt.dismiss}
         onStop={decryptPrompt.stop}
         onReenter={decryptPrompt.reenter}
+      />
+      <UploadModal
+        folderId={folderId}
+        open={isUploadOpen}
+        onOpenChange={setIsUploadOpen}
+        onUploaded={refetch}
       />
     </div>
   );

@@ -82,6 +82,12 @@ The UI is broken down into specific interactive client components ensuring optim
    - Displays decrypted metadata and provides an edit mode for all current `details.json` fields plus thumbnail replacement/removal.
    - Uploads only the new encrypted `.meta` bytes; it never renames or updates the paired original payload.
 
+11. Upload routes:
+   - `POST /api/drive/upload/meta` creates encrypted opaque metadata in the selected folder.
+   - `POST /api/drive/upload/session` creates its temporary opaque payload and resumable Drive session.
+   - The browser uploads encrypted payload chunks directly to that session, then `POST /api/drive/upload/complete` names the payload `<id>`.
+   - `DELETE /api/drive/upload/cleanup` removes a user-cancelled pair. Original names and plaintext never reach these routes.
+
 ## Data Hooks
 
 - `useMetaFiles`:

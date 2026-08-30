@@ -8,6 +8,8 @@ This document explains the browser file-selection/download workflow, integration
 
 Files are stored in Google Drive as opaque, end-to-end encrypted payloads (named with numeric IDs) alongside `.meta` description sidecars. VaultDrive supports both direct browser downloads and an encrypted-file export workflow.
 
+VaultDrive can also create new pairs in the browser. It preserves the CLI payload layout (`[4-byte filename length][filename][file bytes]` inside an age stream), so browser uploads remain decryptable with `decrypt-file.mjs`.
+
 To download files, VaultDrive provides a bulk-download helper pipeline:
 
 ### Workflow
