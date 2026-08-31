@@ -31,6 +31,8 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { FileDownloadButton } from "@/components/file-download-button";
+import { MediaPreviewButton } from "@/components/media-preview-button";
+import { inferMimeType } from "@/lib/crypto";
 
 interface MetaDetailModalProps {
   meta: DecryptedMeta | null;
@@ -253,6 +255,8 @@ function MetaDetailContent({
   }
 
   const { details, originalFileName, driveFile } = meta;
+  const mediaMime = (details.extra?.mime_type as string | undefined) || inferMimeType(originalFileName);
+  const isMedia = !!mediaMime?.startsWith("audio/") || !!mediaMime?.startsWith("video/");
   return (
     <div className="flex max-h-[95vh] w-full flex-col md:h-[75vh] md:flex-row">
       <div className="relative flex min-h-[260px] flex-1 items-center justify-center bg-black/95 p-4 md:min-h-0">
@@ -298,6 +302,7 @@ function MetaDetailContent({
         {!isEditing ? (
           <>
             <div className="flex gap-2">
+              {isMedia && <MediaPreviewButton target={{ metaFileId: driveFile.id, displayName: details.name || originalFileName, originalFileName, mimeType: mediaMime, expectedSize: details.extra?.size_bytes !== undefined ? Number(details.extra.size_bytes) : Number(driveFile.size) }} showLabel className="flex-1 justify-center" />}
               <FileDownloadButton
                 target={{
                   metaFileId: driveFile.id,
@@ -362,7 +367,7 @@ function MetaDetailContent({
               </div>
             </div>
 
-            {details.extra && Object.keys(details.extra).filter((key) => key !== "size_bytes").length > 0 && (
+            {details.extra && Object.keys(details.extra).filter((key) => key !== "size_bytes" && key !== "mime_type").length > 0 && (
               <>
                 <Separator />
                 <div className="flex flex-col gap-2">
@@ -371,7 +376,7 @@ function MetaDetailContent({
                   </span>
                   <div className="rounded-lg border border-white/8 bg-white/3">
                     {Object.entries(details.extra)
-                      .filter(([key]) => key !== "size_bytes")
+                      .filter(([key]) => key !== "size_bytes" && key !== "mime_type")
                       .map(([key, value], index, entries) => (
                         <div
                           key={key}

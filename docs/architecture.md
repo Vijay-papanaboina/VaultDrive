@@ -19,6 +19,7 @@ The current frontend separates page-specific data discovery from shared file-bro
 5. **Download Pipeline**: `components/file-download-provider.tsx` resolves encrypted payloads through the authenticated API, passes the response body through age stream decryption, validates the small CLI-compatible filename header, and writes plaintext chunks directly to disk when the browser supports the File System Access API.
 6. **Metadata Edit Pipeline**: `MetaDetailModal` edits the in-memory `details.json` object and thumbnail bytes, `lib/crypto.ts` creates a new ZIP and age ciphertext in the browser, and `PUT /api/drive/meta/[fileId]` replaces only the existing `.meta` file content through the authenticated Drive API.
 7. **Upload Pipeline**: `UploadModal` creates the small encrypted `.meta` sidecar first. The original is then read from `File.slice()` in bounded chunks, given the same CLI filename header, age-encrypted locally, and sent with a Drive resumable upload. Drive sees only opaque numeric `<id>.meta` and `<id>` names.
+8. **Media Preview Pipeline**: Audio/video previews consume the payload's one-pass decrypted stream once. Each plaintext chunk is written at its offset to an origin-private OPFS temporary file and appended to a `MediaSource` buffer. The browser never assembles the original in JavaScript memory. If MSE evicts a range, the player rebuilds the buffer by reading bounded chunks back from OPFS. Unsupported codecs fall back to the normal download action.
 
 ## Data Flow: Google OAuth to Decryption
 
@@ -82,6 +83,14 @@ sequenceDiagram
     Next.js API-->>Client (React): Encrypted payload bytes
     Client (React)->>Client (React): Worker decrypts payload and parses filename header
     Client (React)-->>User: Save plaintext file with embedded original filename
+
+    User->>Client (React): Preview audio or video
+    Client (React)->>Next.js API: Request encrypted paired payload
+    Next.js API-->>Client (React): Encrypted stream
+    Client (React)->>Client (React): age-decrypt one pass
+    Client (React)->>Client (React): Write bounded plaintext chunks to OPFS
+    Client (React)->>Client (React): Append bounded chunks to MediaSource
+    Client (React)-->>User: Play while download/decryption continues
 ```
 
 ## Security Guarantees
@@ -92,6 +101,7 @@ sequenceDiagram
 - The `.meta` blobs and payloads stored in Google Drive are completely opaque. Metadata is a zip containing JSON and thumbnails, while payloads contain a filename header and file bytes; both are encrypted using `age-encryption`.
 - Original-file downloads fetch encrypted payload bytes through the server proxy, but age decryption, filename parsing, and plaintext Blob creation all happen in the browser. Plaintext is not sent back to the server.
 - Better SQLite3 is used locally purely for Better Auth session management (if the Next.js app is hosted), keeping OAuth tokens secure.
+- Media preview plaintext is temporarily cached in the browser's origin-private file system so seeking and MSE replay are possible. The cache contains only opaque Drive IDs, is never uploaded, is removed on vault lock or when manually cleared, and expires after two hours of inactivity. This is a deliberate usability tradeoff: previews require trusting the unlocked browser profile during that period.
 
 ## Search Pipeline
 

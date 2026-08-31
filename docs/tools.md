@@ -32,6 +32,8 @@ To download files, VaultDrive provides a bulk-download helper pipeline:
 
 Every successfully decrypted card exposes a download icon on hover, and the same action is available in the card detail modal. The browser resolves the matching payload by using the `.meta` Drive file ID, the `.meta` file's parent folder, and the metadata filename without `.meta`. It then stream-decrypts the payload locally and saves the embedded original filename. The navbar's Downloads button shows each file's current stage and byte progress.
 
+Audio and video cards also expose **Preview**. Preview decrypts once while downloading, appends bounded chunks to MediaSource, and stores those chunks in an origin-private temporary cache for replay when the browser evicts a buffered range. Playback can only seek through data already decrypted; unsupported browser/codec combinations show the normal Download fallback. The cache is purged when the vault is locked, manually cleared, or after two hours of inactivity.
+
 ## Editing metadata
 
 Open a decrypted card and choose **Edit** to change the fields stored in `details.json` (`name`, `description`, `date`, and `extra`) or replace/remove its thumbnail. The browser rebuilds and age-encrypts the metadata ZIP, then sends the ciphertext to `PUT /api/drive/meta/{fileId}`. Only the existing `.meta` file content is replaced; the paired encrypted original payload, Drive filename, parent folder, and other Drive metadata are not changed.

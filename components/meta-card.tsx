@@ -5,6 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FileDownloadButton } from "@/components/file-download-button";
+import { MediaPreviewButton } from "@/components/media-preview-button";
+import { inferMimeType } from "@/lib/crypto";
 import type { ProgressiveMetaFile } from "@/types";
 import {
   Calendar,
@@ -59,6 +61,8 @@ export const MetaCard = memo(
     } = meta;
 
     const isClickable = isSelectionMode || (decrypted && !decryptError);
+    const mediaMime = (details?.extra?.mime_type as string | undefined) || inferMimeType(originalFileName);
+    const isMedia = !!mediaMime?.startsWith("audio/") || !!mediaMime?.startsWith("video/");
 
     return (
       <Card
@@ -99,6 +103,8 @@ export const MetaCard = memo(
           )}
 
           {decrypted && !decryptError && (
+            <div className="absolute right-2.5 top-2.5 z-10 flex gap-1.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
+            {isMedia && <MediaPreviewButton target={{ metaFileId: driveFile.id, displayName: details?.name ?? originalFileName, originalFileName, mimeType: mediaMime, expectedSize: details?.extra?.size_bytes !== undefined ? Number(details.extra.size_bytes) : Number(driveFile.size) }} />}
             <FileDownloadButton
               target={{
                 metaFileId: driveFile.id,
@@ -108,8 +114,9 @@ export const MetaCard = memo(
                     ? Number(details.extra.size_bytes)
                     : Number(driveFile.size),
               }}
-              className="absolute right-2.5 top-2.5 z-10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+              className=""
             />
+            </div>
           )}
 
           {meta.status === "pending" || meta.status === "downloading" ? (
@@ -225,11 +232,11 @@ export const MetaCard = memo(
               <Skeleton className="h-4 w-16 rounded-full" />
             </div>
           ) : details?.extra &&
-            Object.keys(details.extra).filter((k) => k !== "size_bytes")
+            Object.keys(details.extra).filter((k) => k !== "size_bytes" && k !== "mime_type")
               .length > 0 ? (
             (() => {
               const extraEntries = Object.entries(details.extra).filter(
-                ([k]) => k !== "size_bytes",
+                ([k]) => k !== "size_bytes" && k !== "mime_type",
               );
               return (
                 <div className="flex flex-wrap gap-1">

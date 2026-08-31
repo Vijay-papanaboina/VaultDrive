@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import { Calendar, FileUp, ImagePlus, Loader2, Upload, X } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { IMAGE_EXTS } from "@/lib/crypto";
+import { IMAGE_EXTS, inferMimeType } from "@/lib/crypto";
 import { useFileUpload } from "@/components/file-upload-provider";
 
 interface UploadModalProps {
@@ -69,7 +69,7 @@ export function UploadModal({ folderId, open, onOpenChange, onUploaded }: Upload
     try {
       const parsed = extraJson.trim() ? JSON.parse(extraJson) : {};
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Extra metadata must be a JSON object.");
-      extra = { ...parsed, size_bytes: original.size };
+      extra = { ...parsed, size_bytes: original.size, mime_type: original.type || inferMimeType(original.name) };
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Extra metadata is not valid JSON.");
       return;

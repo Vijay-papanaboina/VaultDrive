@@ -22,6 +22,7 @@ interface CryptoContextValue {
   setDismissedPassphraseError: (val: boolean) => void;
   isGateOpen: boolean;
   setIsGateOpen: (val: boolean) => void;
+  registerSensitiveCleanup: (cleanup: () => void | Promise<void>) => () => void;
 }
 
 const CryptoContext = createContext<CryptoContextValue | null>(null);
@@ -36,6 +37,7 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
   const [passphraseError, setPassphraseError] = useState<string | null>(null);
   const [dismissedPassphraseError, setDismissedPassphraseError] = useState(false);
   const [isGateOpen, setIsGateOpen] = useState(false);
+  const cleanupRef = useRef(new Set<() => void | Promise<void>>());
 
   const queryClient = useQueryClient();
 
@@ -62,6 +64,7 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
   }
 
   function clearPassphrase(errorMsg?: string) {
+    for (const cleanup of cleanupRef.current) void cleanup();
     identityRef.current = null;
     setHasPassphrase(false);
     setIsGateOpen(false);
@@ -71,6 +74,11 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
     } else {
       setPassphraseError(null);
     }
+  }
+
+  function registerSensitiveCleanup(cleanup: () => void | Promise<void>) {
+    cleanupRef.current.add(cleanup);
+    return () => cleanupRef.current.delete(cleanup);
   }
 
   function clearPassphraseError() {
@@ -91,6 +99,7 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
         setDismissedPassphraseError,
         isGateOpen,
         setIsGateOpen,
+        registerSensitiveCleanup,
       },
     },
     children

@@ -7,6 +7,10 @@ import type { MetaDetails } from "@/types";
 import { argon2id } from "hash-wasm";
 
 export const IMAGE_EXTS = /\.(webp|jpg|jpeg|png|gif|avif|bmp|svg)$/i;
+export function inferMimeType(filename: string): string | undefined {
+  const ext = filename.toLowerCase().split(".").pop() || "";
+  return ({ mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm", ogv: "video/ogg", mov: "video/quicktime", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", ogg: "audio/ogg", flac: "audio/flac", weba: "audio/webm" } as Record<string, string>)[ext];
+}
 
 function getMimeType(filename: string): string {
   const ext = filename.split(".").pop()?.toLowerCase() ?? "";
