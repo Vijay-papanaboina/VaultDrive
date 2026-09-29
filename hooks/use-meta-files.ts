@@ -11,6 +11,7 @@ import {
   DOWNLOAD_CONCURRENCY,
   markUndecryptedFilesStopped,
   replaceMetaFile,
+  revokeThumbnailUrls,
   sortDriveFilesNewestFirst,
 } from "@/lib/meta-decryption";
 import type { ProgressiveMetaFile, DriveMetaFile, DecryptionStatus } from "@/types";
@@ -29,12 +30,12 @@ export function useMetaFiles(
   folderId: string,
   initialFiles?: DriveMetaFile[]
 ): UseMetaFilesResult {
-  const { hasPassphrase, getPassphrase, setDismissedPassphraseError } = useCrypto();
+  const { hasPassphrase, keyVersion, getPassphrase, registerSensitiveCleanup, setDismissedPassphraseError } = useCrypto();
   const queryClient = useQueryClient();
   const [refreshKey, setRefreshKey] = useState(0);
 
   const { data: driveFiles, error: listError, isLoading: isListLoading } = useQuery<DriveMetaFile[]>({
-    queryKey: ["meta-list", folderId, refreshKey],
+    queryKey: ["meta-list", folderId, keyVersion, refreshKey],
     queryFn: () => fetchMetaList(folderId, refreshKey > 0),
     enabled: !!folderId && hasPassphrase,
     initialData: refreshKey === 0 ? initialFiles : undefined,
@@ -45,6 +46,30 @@ export function useMetaFiles(
   const [decryptError, setDecryptError] = useState<string | null>(null);
   const cancelRequestedRef = useRef(false);
   const activeFetchesRef = useRef<Set<AbortController>>(new Set());
+  const activeWorkersRef = useRef<Worker[]>([]);
+  const decryptionAbortRef = useRef<AbortController | null>(null);
+  const latestFilesRef = useRef<ProgressiveMetaFile[]>([]);
+
+  useEffect(() => {
+    latestFilesRef.current = files;
+  }, [files]);
+
+  const clearSensitiveState = useCallback(() => {
+    cancelRequestedRef.current = true;
+    decryptionAbortRef.current?.abort();
+    decryptionAbortRef.current = null;
+    activeFetchesRef.current.forEach((controller) => controller.abort());
+    activeFetchesRef.current.clear();
+    activeWorkersRef.current.forEach((worker) => worker.terminate());
+    activeWorkersRef.current = [];
+    revokeThumbnailUrls(latestFilesRef.current);
+    latestFilesRef.current = [];
+    setFiles([]);
+    setIsDecrypting(false);
+    setDecryptError(null);
+  }, []);
+
+  useEffect(() => registerSensitiveCleanup(clearSensitiveState), [clearSensitiveState, registerSensitiveCleanup]);
 
   const refetch = useCallback(() => {
     cancelRequestedRef.current = false;
@@ -58,8 +83,12 @@ export function useMetaFiles(
 
   const cancelDecryption = useCallback(() => {
     cancelRequestedRef.current = true;
+    decryptionAbortRef.current?.abort();
+    decryptionAbortRef.current = null;
     activeFetchesRef.current.forEach((controller) => controller.abort());
     activeFetchesRef.current.clear();
+    activeWorkersRef.current.forEach((worker) => worker.terminate());
+    activeWorkersRef.current = [];
     setIsDecrypting(false);
 
     const decryptedQueryKey = ["decrypted-folder", folderId];
@@ -80,6 +109,8 @@ export function useMetaFiles(
     let cancelled = false;
     cancelRequestedRef.current = false;
     const activeFetches = activeFetchesRef.current;
+    const decryptionAbort = new AbortController();
+    decryptionAbortRef.current = decryptionAbort;
     const decryptedQueryKey = ["decrypted-folder", folderId];
     const filesToDecrypt = sortDriveFilesNewestFirst(driveFiles);
 
@@ -105,6 +136,7 @@ export function useMetaFiles(
       const worker = new Worker(new URL("../lib/decrypt.worker.ts", import.meta.url));
       workers.push(worker);
     }
+    activeWorkersRef.current = workers;
 
     let nextJobIndex = 0;
 
@@ -152,7 +184,9 @@ export function useMetaFiles(
             worker,
             file.id,
             passphrase!,
-            bytes
+            bytes,
+            30000,
+            decryptionAbort.signal
           );
 
           if (!cancelled && !cancelRequestedRef.current) {
@@ -238,13 +272,17 @@ export function useMetaFiles(
 
     return () => {
       cancelled = true;
+      decryptionAbort.abort();
       activeFetches.forEach((controller) => controller.abort());
       activeFetches.clear();
       workers.forEach((w) => w.terminate());
+      if (activeWorkersRef.current === workers) activeWorkersRef.current = [];
+      if (decryptionAbortRef.current === decryptionAbort) decryptionAbortRef.current = null;
     };
   }, [
     folderId,
     hasPassphrase,
+    keyVersion,
     driveFiles,
     getPassphrase,
     queryClient,

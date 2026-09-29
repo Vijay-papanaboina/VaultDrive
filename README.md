@@ -29,7 +29,7 @@ All sensitive cryptographic operations—including passphrase-derived key creati
 - **UI Library**: [React 19](https://react.dev/)
 - **Styling**: [Tailwind CSS v4](https://tailwindcss.com/)
 - **Components**: [Base UI](https://base-ui.com/) & custom themed components
-- **Authentication**: [Better Auth](https://better-auth.com/) (using Google OAuth & Better SQLite3 for local session persistence)
+- **Authentication**: [Better Auth](https://better-auth.com/) using Google OAuth and PostgreSQL through a standard `pg` pool
 - **Storage**: [Google Drive API (v3)](https://developers.google.com/drive/api/v3/reference)
 - **Encryption**: [`age-encryption`](https://github.com/FiloSottile/age) & [`fflate`](https://github.com/101arrowz/fflate)
 - **Search**: [`Fuse.js`](https://fusejs.io/)
@@ -54,18 +54,28 @@ For an in-depth look at how the system maintains zero-knowledge privacy while in
 2. **Setup Environment**:
    Create a `.env.local` file with the following variables:
    ```env
+   DATABASE_URL=postgresql://vaultdrive:change_me@localhost:5432/vaultdrive
    BETTER_AUTH_URL=http://localhost:3000
+   NEXT_PUBLIC_BETTER_AUTH_URL=http://localhost:3000
    BETTER_AUTH_SECRET=your_secret_here
    AUTH_GOOGLE_ID=your_google_oauth_client_id
    AUTH_GOOGLE_SECRET=your_google_oauth_client_secret
    ```
+   Set `DATABASE_URL` to a standard PostgreSQL connection URI. For a TLS-required hosted database, include `sslmode=verify-full`, for example `postgresql://user:password@db.example.com:5432/vaultdrive?sslmode=verify-full`. Local PostgreSQL may omit the `sslmode` query parameter when its server does not require TLS.
    Ensure your Google OAuth application has the `https://www.googleapis.com/auth/drive` scope enabled. Existing users must sign in again after this scope changes so Google can issue a write-enabled token.
 
-3. **Run the Development Server**:
+3. **Initialize Better Auth Tables**:
+   Set `DATABASE_URL` to a real PostgreSQL connection, then run:
+   ```bash
+   pnpm db:migrate
+   ```
+   This initializes or updates the Better Auth tables. Start or restart the development server, then sign in.
+
+4. **Run the Development Server**:
    ```bash
    npm run dev
    # or
    pnpm dev
    ```
 
-4. Open [http://localhost:3000](http://localhost:3000) to login via Google and access your encrypted drive.
+5. Open [http://localhost:3000](http://localhost:3000) to login via Google and access your encrypted drive.

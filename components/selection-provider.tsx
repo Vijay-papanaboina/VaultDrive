@@ -1,6 +1,7 @@
 "use client";
 
-import React, { createContext, useContext, useState, ReactNode, useCallback } from "react";
+import React, { createContext, useContext, useState, ReactNode, useCallback, useEffect } from "react";
+import { useCrypto } from "@/hooks/use-crypto";
 
 export interface SelectedFile {
   id: string;
@@ -23,6 +24,7 @@ interface SelectionContextValue {
 const SelectionContext = createContext<SelectionContextValue | null>(null);
 
 export function SelectionProvider({ children }: { children: ReactNode }) {
+  const { registerSensitiveCleanup } = useCrypto();
   const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<SelectedFile[]>([]);
 
@@ -44,6 +46,8 @@ export function SelectionProvider({ children }: { children: ReactNode }) {
   const clearSelection = useCallback(() => {
     setSelectedFiles([]);
   }, []);
+
+  useEffect(() => registerSensitiveCleanup(clearSelection), [clearSelection, registerSensitiveCleanup]);
 
   const isFileSelected = useCallback((id: string) => {
     return selectedFiles.some((f) => f.id === id);

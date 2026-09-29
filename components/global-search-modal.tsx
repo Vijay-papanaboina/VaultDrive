@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useCallback, useEffect, useState, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import Fuse from "fuse.js";
 import {
@@ -16,6 +16,7 @@ import { useSelection } from "@/components/selection-provider";
 import { breadcrumbsToRelativePath } from "@/lib/drive-path";
 import type { ProgressiveMetaFile, BreadcrumbItem, DecryptedMeta } from "@/types";
 import { Search, FileX, Archive } from "lucide-react";
+import { useCrypto } from "@/hooks/use-crypto";
 
 interface GlobalSearchModalProps {
   isOpen: boolean;
@@ -35,6 +36,14 @@ export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedDetail, setSelectedDetail] = useState<DecryptedMeta | null>(null);
   const [, setMetadataRevision] = useState(0);
+  const { registerSensitiveCleanup } = useCrypto();
+
+  const clearSensitiveState = useCallback(() => {
+    setSearchQuery("");
+    setSelectedDetail(null);
+  }, []);
+
+  useEffect(() => registerSensitiveCleanup(clearSensitiveState), [clearSensitiveState, registerSensitiveCleanup]);
 
   // 1. Gather all files from the React Query cache. This intentionally runs
   // on each render so metadataRevision reflects a successful save immediately.

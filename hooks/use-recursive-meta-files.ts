@@ -11,6 +11,7 @@ import {
   DOWNLOAD_CONCURRENCY,
   markUndecryptedFilesStopped,
   replaceMetaFile,
+  revokeThumbnailUrls,
   sortDriveFilesNewestFirst,
   upsertMetaFile,
 } from "@/lib/meta-decryption";
@@ -32,7 +33,7 @@ export function useRecursiveMetaFiles(
   rootFolderId: string,
   rootFolderName?: string,
 ): UseRecursiveMetaFilesResult {
-  const { hasPassphrase, getPassphrase, setDismissedPassphraseError } = useCrypto();
+  const { hasPassphrase, keyVersion, getPassphrase, registerSensitiveCleanup, setDismissedPassphraseError } = useCrypto();
   const queryClient = useQueryClient();
 
   const [isCrawling, setIsCrawling] = useState(true);
@@ -46,15 +47,37 @@ export function useRecursiveMetaFiles(
   const [refreshKey, setRefreshKey] = useState(0);
   const cancelRequestedRef = useRef(false);
   const activeFetchesRef = useRef<Set<AbortController>>(new Set());
+  const activeWorkersRef = useRef<Worker[]>([]);
+  const decryptionAbortRef = useRef<AbortController | null>(null);
   const latestFilesRef = useRef<ProgressiveMetaFile[]>([]);
 
   useEffect(() => {
     latestFilesRef.current = files;
   }, [files]);
 
+  const clearSensitiveState = useCallback(() => {
+    cancelRequestedRef.current = true;
+    decryptionAbortRef.current?.abort();
+    decryptionAbortRef.current = null;
+    activeFetchesRef.current.forEach((controller) => controller.abort());
+    activeFetchesRef.current.clear();
+    activeWorkersRef.current.forEach((worker) => worker.terminate());
+    activeWorkersRef.current = [];
+    revokeThumbnailUrls(latestFilesRef.current);
+    latestFilesRef.current = [];
+    setFiles([]);
+    setIsDecrypting(false);
+    setDecryptError(null);
+    setCrawlerError(null);
+    setDiscoveredFolderIds([]);
+    setFolderIdToPath({});
+  }, []);
+
+  useEffect(() => registerSensitiveCleanup(clearSensitiveState), [clearSensitiveState, registerSensitiveCleanup]);
+
   // 1. BFS Recursive Tree Walk — also builds folderId→fullPath map during traversal
   useEffect(() => {
-    if (!rootFolderId) return;
+    if (!rootFolderId || !hasPassphrase) return;
 
     let active = true;
 
@@ -98,18 +121,18 @@ export function useRecursiveMetaFiles(
 
     crawl();
     return () => { active = false; };
-  }, [rootFolderId, rootFolderName, refreshKey]);
+  }, [rootFolderId, rootFolderName, refreshKey, keyVersion, hasPassphrase]);
 
   // 2. Fetch all meta file lists for all discovered folders in parallel
   const { data: driveFiles, error: listError, isLoading: isListLoading } = useQuery<
     (DriveMetaFile & { folderId: string })[]
   >({
-    queryKey: ["recursive-meta-list", rootFolderId, discoveredFolderIds, refreshKey],
+    queryKey: ["recursive-meta-list", rootFolderId, discoveredFolderIds, keyVersion, refreshKey],
     queryFn: async () => {
       const promises = discoveredFolderIds.map(async (folderId) => {
         const fileList = await fetchMetaList(folderId, refreshKey > 0);
         // Seed per-folder list cache so global search modal picks them up
-        queryClient.setQueryData(["meta-list", folderId, refreshKey], fileList);
+        queryClient.setQueryData(["meta-list", folderId, keyVersion, refreshKey], fileList);
         return fileList.map((f) => ({ ...f, folderId }));
       });
       const results = await Promise.all(promises);
@@ -132,8 +155,12 @@ export function useRecursiveMetaFiles(
 
   const cancelDecryption = useCallback(() => {
     cancelRequestedRef.current = true;
+    decryptionAbortRef.current?.abort();
+    decryptionAbortRef.current = null;
     activeFetchesRef.current.forEach((controller) => controller.abort());
     activeFetchesRef.current.clear();
+    activeWorkersRef.current.forEach((worker) => worker.terminate());
+    activeWorkersRef.current = [];
     setIsDecrypting(false);
 
     const updated = markUndecryptedFilesStopped(latestFilesRef.current);
@@ -175,6 +202,8 @@ export function useRecursiveMetaFiles(
     let cancelled = false;
     cancelRequestedRef.current = false;
     const activeFetches = activeFetchesRef.current;
+    const decryptionAbort = new AbortController();
+    decryptionAbortRef.current = decryptionAbort;
 
     const filesToDecrypt = sortDriveFilesNewestFirst(driveFiles);
 
@@ -199,6 +228,7 @@ export function useRecursiveMetaFiles(
     for (let i = 0; i < workerCount; i++) {
       workers.push(new Worker(new URL("../lib/decrypt.worker.ts", import.meta.url)));
     }
+    activeWorkersRef.current = workers;
 
     let nextJobIndex = 0;
 
@@ -257,7 +287,9 @@ export function useRecursiveMetaFiles(
             worker,
             file.id,
             passphrase!,
-            bytes
+            bytes,
+            30000,
+            decryptionAbort.signal
           );
 
           if (!cancelled && !cancelRequestedRef.current) {
@@ -326,11 +358,14 @@ export function useRecursiveMetaFiles(
 
     return () => {
       cancelled = true;
+      decryptionAbort.abort();
       activeFetches.forEach((controller) => controller.abort());
       activeFetches.clear();
       workers.forEach((w) => w.terminate());
+      if (activeWorkersRef.current === workers) activeWorkersRef.current = [];
+      if (decryptionAbortRef.current === decryptionAbort) decryptionAbortRef.current = null;
     };
-  }, [driveFiles, hasPassphrase, getPassphrase, queryClient, refreshKey, rootFolderId]);
+  }, [driveFiles, hasPassphrase, keyVersion, getPassphrase, queryClient, refreshKey, rootFolderId]);
 
   const queryError = crawlerError || listError || decryptError;
   const errorMsg = queryError

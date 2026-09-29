@@ -112,12 +112,19 @@ export function markUndecryptedFilesStopped(files: ProgressiveMetaFile[]) {
   );
 }
 
+export function revokeThumbnailUrls(files: ProgressiveMetaFile[]) {
+  for (const file of files) {
+    if (file.thumbnailUrl) URL.revokeObjectURL(file.thumbnailUrl);
+  }
+}
+
 export async function decryptWithWorker(
   worker: Worker,
   fileId: string,
   identity: string,
   encryptedData: Uint8Array,
-  timeoutMs = 30000
+  timeoutMs = 30000,
+  signal?: AbortSignal
 ): Promise<WorkerDecryptResult> {
   return new Promise<WorkerDecryptResult>((resolve) => {
     let resolved = false;
@@ -125,37 +132,42 @@ export async function decryptWithWorker(
     const cleanup = () => {
       worker.removeEventListener("message", handleMessage);
       worker.removeEventListener("error", handleError);
+      signal?.removeEventListener("abort", handleAbort);
       clearTimeout(timeoutId);
+    };
+
+    const finish = (result: WorkerDecryptResult) => {
+      cleanup();
+      if (!resolved) {
+        resolved = true;
+        resolve(result);
+      }
     };
 
     const handleMessage = (e: MessageEvent) => {
       if (e.data.fileId === fileId) {
-        cleanup();
-        if (!resolved) {
-          resolved = true;
-          resolve(e.data as WorkerDecryptResult);
-        }
+        finish(e.data as WorkerDecryptResult);
       }
     };
 
     const handleError = (e: ErrorEvent) => {
-      cleanup();
-      if (!resolved) {
-        resolved = true;
-        resolve({ success: false, error: e.message || "Worker error occurred" });
-      }
+      finish({ success: false, error: e.message || "Worker error occurred" });
     };
 
+    const handleAbort = () => finish({ success: false, error: DECRYPTION_STOPPED_ERROR });
+
     const timeoutId = setTimeout(() => {
-      cleanup();
-      if (!resolved) {
-        resolved = true;
-        resolve({ success: false, error: "Decryption timeout" });
-      }
+      finish({ success: false, error: "Decryption timeout" });
     }, timeoutMs);
+
+    if (signal?.aborted) {
+      handleAbort();
+      return;
+    }
 
     worker.addEventListener("message", handleMessage);
     worker.addEventListener("error", handleError);
+    signal?.addEventListener("abort", handleAbort, { once: true });
     worker.postMessage(
       {
         fileId,

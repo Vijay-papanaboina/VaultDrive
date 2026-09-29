@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth";
-import { DriveApiError, getFileContent, updateFileContent } from "@/lib/google-drive";
+import { readBoundedRequestBody, RequestBodyTooLargeError } from "@/lib/bounded-request-body";
+import { DriveApiError, getMetaFileStream, updateFileContent } from "@/lib/google-drive";
 import { headers } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -26,11 +27,10 @@ export async function GET(
       return new NextResponse("fileId is required", { status: 400 });
     }
 
-    const bytes = await getFileContent(tokenResult.accessToken, fileId);
+    const file = await getMetaFileStream(tokenResult.accessToken, fileId);
 
-    // Return raw bytes — client will decrypt with age-encryption
-    // Pass the underlying ArrayBuffer (valid BodyInit), not Uint8Array
-    return new NextResponse(bytes.buffer as ArrayBuffer, {
+    // Return raw encrypted bytes without buffering; the client decrypts them with age-encryption.
+    return new NextResponse(file.body, {
       status: 200,
       headers: {
         "Content-Type": "application/octet-stream",
@@ -39,6 +39,7 @@ export async function GET(
     });
   } catch (err) {
     console.error("[/api/drive/meta/[fileId]]", err);
+    if (err instanceof DriveApiError) return new NextResponse(err.message, { status: err.status });
     return new NextResponse("Failed to fetch file", { status: 500 });
   }
 }
@@ -73,7 +74,7 @@ export async function PUT(
       });
     }
 
-    const content = new Uint8Array(await request.arrayBuffer());
+    const content = await readBoundedRequestBody(request, 25 * 1024 * 1024);
     if (content.byteLength === 0) {
       return new NextResponse("Encrypted metadata content is empty", { status: 400 });
     }
@@ -95,6 +96,9 @@ export async function PUT(
     );
   } catch (err) {
     console.error("[/api/drive/meta/[fileId]] PUT", err);
+    if (err instanceof RequestBodyTooLargeError) {
+      return new NextResponse("Encrypted metadata content is too large", { status: 413 });
+    }
     if (err instanceof DriveApiError) {
       const message = err.status === 403
         ? "Google Drive write permission is required. Reconnect your Google account."

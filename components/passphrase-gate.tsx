@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useCrypto } from "@/hooks/use-crypto";
 import {
   Dialog,
@@ -22,28 +22,61 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
   const {
     hasPassphrase,
     setPassphrase,
+    cancelPassphraseOperation,
     passphraseError,
     clearPassphraseError,
     isGateOpen,
     setIsGateOpen,
+    registerSensitiveCleanup,
   } = useCrypto();
   const [value, setValue] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [loading, setLoading] = useState(false);
+  const submitGenerationRef = useRef(0);
+  const pendingSubmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const invalidatePendingSubmit = useCallback((cancelDerivation = false) => {
+    submitGenerationRef.current += 1;
+    if (pendingSubmitTimerRef.current !== null) {
+      clearTimeout(pendingSubmitTimerRef.current);
+      pendingSubmitTimerRef.current = null;
+    }
+    if (cancelDerivation) cancelPassphraseOperation();
+  }, [cancelPassphraseOperation]);
+
+  const clearSensitiveState = useCallback(() => {
+    invalidatePendingSubmit();
+    setValue("");
+    setShowPw(false);
+    setLoading(false);
+  }, [invalidatePendingSubmit]);
+
+  useEffect(() => {
+    const unregister = registerSensitiveCleanup(clearSensitiveState);
+    return () => {
+      invalidatePendingSubmit(true);
+      unregister();
+    };
+  }, [clearSensitiveState, invalidatePendingSubmit, registerSensitiveCleanup]);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!value.trim()) return;
+    const passphrase = value.trim();
+    if (!passphrase) return;
+    invalidatePendingSubmit(true);
+    const submitGeneration = submitGenerationRef.current;
     setLoading(true);
     // Small delay so the spinner renders before derivation blocks
-    setTimeout(async () => {
+    pendingSubmitTimerRef.current = setTimeout(async () => {
+      pendingSubmitTimerRef.current = null;
+      if (submitGeneration !== submitGenerationRef.current) return;
       try {
-        await setPassphrase(value.trim());
-        setValue("");
+        await setPassphrase(passphrase);
+        if (submitGeneration === submitGenerationRef.current) setValue("");
       } catch (err) {
-        console.error(err);
+        if (submitGeneration === submitGenerationRef.current) console.error(err);
       } finally {
-        setLoading(false);
+        if (submitGeneration === submitGenerationRef.current) setLoading(false);
       }
     }, 50);
   }
@@ -60,6 +93,7 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
 
       <Dialog open={isOpen} onOpenChange={(open) => {
         if (!open && hasPassphrase) {
+          invalidatePendingSubmit(true);
           setIsGateOpen(false);
           setValue("");
           if (passphraseError) clearPassphraseError();
@@ -128,6 +162,7 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
                   type="button"
                   variant="outline"
                   onClick={() => {
+                    invalidatePendingSubmit(true);
                     setIsGateOpen(false);
                     setValue("");
                     if (passphraseError) clearPassphraseError();

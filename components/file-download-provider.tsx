@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useCallback, useContext, useRef, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useCrypto } from "@/hooks/use-crypto";
 import { decryptPayloadStream } from "@/lib/crypto";
 
@@ -94,7 +94,7 @@ function safeFilename(filename: string): string {
   return safe && safe !== "." && safe !== ".." ? safe : "download";
 }
 
-function triggerDownload(chunks: Uint8Array[], filename: string) {
+function triggerDownload(chunks: Uint8Array[], filename: string): string {
   const blob = new Blob(chunks as unknown as BlobPart[], {
     type: "application/octet-stream",
   });
@@ -106,7 +106,7 @@ function triggerDownload(chunks: Uint8Array[], filename: string) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return url;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -143,11 +143,34 @@ async function chooseDirectoryDestination(): Promise<FileDestination | undefined
 }
 
 export function FileDownloadProvider({ children }: { children: React.ReactNode }) {
-  const { getPassphrase } = useCrypto();
+  const { getPassphrase, registerSensitiveCleanup } = useCrypto();
   const [downloadItems, setDownloadItems] = useState<Record<string, DownloadItem>>({});
   const [batch, setBatch] = useState<BatchDownloadState | null>(null);
   const activeIdsRef = useRef(new Set<string>());
   const batchActiveRef = useRef(false);
+  const activeControllersRef = useRef(new Map<string, AbortController>());
+  const activeReadersRef = useRef(new Set<ReadableStreamDefaultReader<Uint8Array>>());
+  const activeWritersRef = useRef(new Set<WritableFileLike>());
+  const fallbackUrlsRef = useRef(new Set<string>());
+  const sensitiveGenerationRef = useRef(0);
+
+  const clearSensitiveState = useCallback(() => {
+    sensitiveGenerationRef.current += 1;
+    activeControllersRef.current.forEach((controller) => controller.abort());
+    activeControllersRef.current.clear();
+    activeReadersRef.current.forEach((reader) => void reader.cancel().catch(() => undefined));
+    activeReadersRef.current.clear();
+    activeWritersRef.current.forEach((writer) => void writer.abort?.().catch(() => undefined));
+    activeWritersRef.current.clear();
+    fallbackUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    fallbackUrlsRef.current.clear();
+    activeIdsRef.current.clear();
+    batchActiveRef.current = false;
+    setDownloadItems({});
+    setBatch(null);
+  }, []);
+
+  useEffect(() => registerSensitiveCleanup(clearSensitiveState), [clearSensitiveState, registerSensitiveCleanup]);
 
   const beginItem = useCallback((target: FileDownloadTarget) => {
     setDownloadItems((previous) => ({
@@ -181,21 +204,32 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
     async (
       target: FileDownloadTarget,
       identity: string,
-      destination?: FileDestination
+      destination: FileDestination | undefined,
+      generation: number,
     ) => {
       if (activeIdsRef.current.has(target.metaFileId)) {
         throw new Error("This file is already downloading");
       }
 
+      const controller = new AbortController();
+      const isCurrent = () =>
+        sensitiveGenerationRef.current === generation && !controller.signal.aborted;
+      const ensureCurrent = () => {
+        if (!isCurrent()) throw new DOMException("Download cancelled", "AbortError");
+      };
+
+      ensureCurrent();
       activeIdsRef.current.add(target.metaFileId);
+      activeControllersRef.current.set(target.metaFileId, controller);
       beginItem(target);
       let writer: WritableFileLike | undefined;
 
       try {
         const response = await fetch(
           `/api/drive/payload/${encodeURIComponent(target.metaFileId)}`,
-          { cache: "no-store" }
+          { cache: "no-store", signal: controller.signal }
         );
+        ensureCurrent();
         if (!response.ok) {
           const message = await response.text();
           throw new Error(message || `Failed to fetch payload (HTTP ${response.status})`);
@@ -207,6 +241,7 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
         // age-encryption consumes the network stream and exposes a decrypted
         // stream. Only the small custom filename header is buffered here.
         const decrypted = await decryptPayloadStream(identity, response.body);
+        ensureCurrent();
         const filename = safeFilename(decrypted.filename || target.fallbackName || "download");
         updateItem(target.metaFileId, {
           stage: "streaming",
@@ -216,9 +251,12 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
 
         if (destination) {
           writer = await destination.open(filename);
+          ensureCurrent();
+          activeWritersRef.current.add(writer);
         }
 
         const reader = decrypted.content.getReader();
+        activeReadersRef.current.add(reader);
         const chunks: Uint8Array[] = [];
         let bytesWritten = 0;
         let lastProgressUpdate = 0;
@@ -226,6 +264,7 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
         try {
           while (true) {
             const { done, value } = await reader.read();
+            ensureCurrent();
             if (done) break;
             if (!value || value.byteLength === 0) continue;
 
@@ -245,30 +284,46 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
             }
           }
         } finally {
+          activeReadersRef.current.delete(reader);
           reader.releaseLock();
         }
 
         if (writer) {
+          ensureCurrent();
           await writer.close();
+          activeWritersRef.current.delete(writer);
         } else {
-          triggerDownload(chunks, filename);
+          ensureCurrent();
+          const url = triggerDownload(chunks, filename);
+          fallbackUrlsRef.current.add(url);
+          setTimeout(() => {
+            if (fallbackUrlsRef.current.delete(url)) URL.revokeObjectURL(url);
+          }, 1000);
         }
 
-        updateItem(target.metaFileId, {
-          stage: "complete",
-          bytesWritten,
-          filename,
-        });
+        if (isCurrent()) {
+          updateItem(target.metaFileId, {
+            stage: "complete",
+            bytesWritten,
+            filename,
+          });
+        }
       } catch (error) {
         if (writer?.abort) await writer.abort(error).catch(() => undefined);
+        if (writer) activeWritersRef.current.delete(writer);
         const message = error instanceof Error ? error.message : "Download failed";
-        updateItem(target.metaFileId, {
-          stage: "failed",
-          error: isAbortError(error) ? "Download cancelled" : message,
-        });
+        if (isCurrent()) {
+          updateItem(target.metaFileId, {
+            stage: "failed",
+            error: isAbortError(error) ? "Download cancelled" : message,
+          });
+        }
         throw error instanceof Error ? error : new Error(message);
       } finally {
-        activeIdsRef.current.delete(target.metaFileId);
+        if (activeControllersRef.current.get(target.metaFileId) === controller) {
+          activeControllersRef.current.delete(target.metaFileId);
+          activeIdsRef.current.delete(target.metaFileId);
+        }
       }
     },
     [beginItem, updateItem]
@@ -278,13 +333,17 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
     async (target: FileDownloadTarget) => {
       if (activeIdsRef.current.has(target.metaFileId)) return;
 
+      const generation = sensitiveGenerationRef.current;
       const identity = getPassphrase();
       if (!identity) throw new Error("Enter your decryption passphrase first");
 
       const destination = await chooseSingleDestination(
         target.fallbackName || target.metaFileId
       );
-      await downloadFileInternal(target, identity, destination);
+      if (generation !== sensitiveGenerationRef.current) {
+        throw new DOMException("Download cancelled", "AbortError");
+      }
+      await downloadFileInternal(target, identity, destination, generation);
     },
     [downloadFileInternal, getPassphrase]
   );
@@ -295,6 +354,7 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
         throw new Error("A download is already in progress");
       }
 
+      const generation = sensitiveGenerationRef.current;
       const identity = getPassphrase();
       if (!identity) throw new Error("Enter your decryption passphrase first");
 
@@ -302,6 +362,9 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
         new Map(inputTargets.map((target) => [target.metaFileId, target])).values()
       );
       const destination = await chooseDirectoryDestination();
+      if (generation !== sensitiveGenerationRef.current) {
+        throw new DOMException("Download cancelled", "AbortError");
+      }
       const failed: BatchDownloadFailure[] = [];
       let succeeded = 0;
       batchActiveRef.current = true;
@@ -309,6 +372,9 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
 
       try {
         for (let index = 0; index < targets.length; index++) {
+          if (generation !== sensitiveGenerationRef.current) {
+            throw new DOMException("Download cancelled", "AbortError");
+          }
           const target = targets[index];
           setBatch({
             active: true,
@@ -318,9 +384,10 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
           });
 
           try {
-            await downloadFileInternal(target, identity, destination);
+            await downloadFileInternal(target, identity, destination, generation);
             succeeded++;
           } catch (error) {
+            if (generation !== sensitiveGenerationRef.current) throw error;
             failed.push({
               target,
               filename: target.fallbackName || target.metaFileId,
@@ -329,8 +396,10 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
           }
         }
       } finally {
-        batchActiveRef.current = false;
-        setBatch({ active: false, completed: targets.length, total: targets.length });
+        if (generation === sensitiveGenerationRef.current) {
+          batchActiveRef.current = false;
+          setBatch({ active: false, completed: targets.length, total: targets.length });
+        }
       }
 
       return { total: targets.length, succeeded, failed };

@@ -1,8 +1,8 @@
 import { betterAuth } from "better-auth";
-import Database from "better-sqlite3";
+import { database } from "@/lib/database";
 
 export const auth = betterAuth({
-  database: new Database("./database.sqlite"),
+  database,
   baseURL: process.env.BETTER_AUTH_URL!,
   secret: process.env.BETTER_AUTH_SECRET!,
   socialProviders: {

@@ -1,10 +1,12 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { signOut, useSession } from "@/lib/auth-client";
 import { useCrypto } from "@/hooks/use-crypto";
 import { identityToRecipient } from "age-encryption";
 import {
+  DropdownMenuCheckboxItem,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -14,6 +16,7 @@ import {
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { KeyRound, Copy, Check, Eye, EyeOff, LogOut, Shield } from "lucide-react";
+import { useMediaPreview } from "@/components/media-preview-provider";
 
 interface AgeKeysDialogProps {
   isOpen: boolean;
@@ -130,8 +133,10 @@ function AgeKeysDialog({ isOpen, onClose, identity }: AgeKeysDialogProps) {
 }
 
 export function UserMenu() {
+  const router = useRouter();
   const { data: session } = useSession();
   const { getPassphrase } = useCrypto();
+  const { encryptedPreviewDiskCacheEnabled, setEncryptedPreviewDiskCacheEnabled } = useMediaPreview();
   const [isKeysOpen, setIsKeysOpen] = useState(false);
   const user = session?.user;
   const identity = getPassphrase();
@@ -168,6 +173,14 @@ export function UserMenu() {
             <Shield className="h-3.5 w-3.5" />
             Drive access for encrypted metadata saves
           </DropdownMenuItem>
+          <DropdownMenuCheckboxItem
+            id="encrypted-preview-disk-cache-toggle"
+            checked={encryptedPreviewDiskCacheEnabled}
+            className="cursor-pointer gap-2 text-foreground focus:text-foreground"
+            onCheckedChange={(checked) => setEncryptedPreviewDiskCacheEnabled(checked === true)}
+          >
+            Cache encrypted MP4 preview ranges on disk
+          </DropdownMenuCheckboxItem>
           {identity && (
             <>
               <DropdownMenuSeparator />
@@ -185,7 +198,7 @@ export function UserMenu() {
           <DropdownMenuItem
             id="sign-out-btn"
             className="gap-2 text-destructive focus:text-destructive cursor-pointer"
-            onClick={() => signOut({ fetchOptions: { onSuccess: () => { window.location.href = "/"; } } })}
+            onClick={() => signOut({ fetchOptions: { onSuccess: () => { router.replace("/"); } } })}
           >
             <LogOut className="h-3.5 w-3.5" />
             Sign out

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefCallback } from "react";
 import { AudioLines, Loader2, ShieldCheck, Video, X } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -17,11 +17,17 @@ function formatBytes(bytes: number) {
 export function MediaPreviewModal() {
   const { preview, closePreview, updateBufferedRanges, requestReplay, setMediaElement } = useMediaPreview();
   const mediaRef = useRef<HTMLMediaElement>(null);
+  const [mountedMedia, setMountedMedia] = useState<HTMLMediaElement | null>(null);
+  const previewId = preview?.target.metaFileId;
   const isVideo = preview?.target.mimeType?.startsWith("video/") || /\.(mp4|m4v|webm|ogv|mov)$/i.test(preview?.target.originalFileName || "");
+  const mediaCallbackRef = useCallback<RefCallback<HTMLMediaElement>>((element) => {
+    mediaRef.current = element;
+    setMountedMedia(element);
+  }, []);
 
   useEffect(() => {
-    const media = mediaRef.current;
-    if (!media || !preview) return;
+    const media = mountedMedia;
+    if (!media || !previewId) return;
     setMediaElement(media);
     const sync = () => {
       const ranges = Array.from({ length: media.buffered.length }, (_, index) => ({ start: media.buffered.start(index), end: media.buffered.end(index) }));
@@ -29,16 +35,22 @@ export function MediaPreviewModal() {
     };
     media.addEventListener("progress", sync);
     media.addEventListener("timeupdate", sync);
-    return () => { media.removeEventListener("progress", sync); media.removeEventListener("timeupdate", sync); setMediaElement(null); };
-  }, [preview, setMediaElement, updateBufferedRanges]);
+    media.addEventListener("waiting", sync);
+    return () => {
+      media.removeEventListener("progress", sync);
+      media.removeEventListener("timeupdate", sync);
+      media.removeEventListener("waiting", sync);
+      setMediaElement(null);
+    };
+  }, [mountedMedia, previewId, setMediaElement, updateBufferedRanges]);
 
   const content = preview && !preview.fallbackDownload && preview.mediaUrl ? (
-    isVideo ? <video ref={mediaRef as RefObject<HTMLVideoElement>} className="max-h-[62vh] w-full rounded-lg bg-black" src={preview.mediaUrl} controls playsInline preload="metadata" onSeeking={() => { const media = mediaRef.current; if (!media) return; const time = media.currentTime; for (let index = 0; index < media.buffered.length; index++) if (time >= media.buffered.start(index) && time <= media.buffered.end(index)) return; void requestReplay(time); }} />
-      : <audio ref={mediaRef} className="w-full" src={preview.mediaUrl} controls preload="metadata" onSeeking={() => { const media = mediaRef.current; if (!media) return; const time = media.currentTime; for (let index = 0; index < media.buffered.length; index++) if (time >= media.buffered.start(index) && time <= media.buffered.end(index)) return; void requestReplay(time); }} />
+    isVideo ? <video ref={mediaCallbackRef as RefCallback<HTMLVideoElement>} className="max-h-[76vh] w-full rounded-lg bg-black" src={preview.mediaUrl} controls playsInline preload="metadata" onSeeking={() => { const media = mediaRef.current; if (!media) return; const time = media.currentTime; for (let index = 0; index < media.buffered.length; index++) if (time >= media.buffered.start(index) && time <= media.buffered.end(index)) return; void requestReplay(time); }} />
+      : <audio ref={mediaCallbackRef as RefCallback<HTMLAudioElement>} className="w-full" src={preview.mediaUrl} controls preload="metadata" onSeeking={() => { const media = mediaRef.current; if (!media) return; const time = media.currentTime; for (let index = 0; index < media.buffered.length; index++) if (time >= media.buffered.start(index) && time <= media.buffered.end(index)) return; void requestReplay(time); }} />
   ) : <div className="flex min-h-48 items-center justify-center rounded-lg border border-white/10 bg-black/30 p-6 text-center text-sm text-muted-foreground">{preview?.error || "Preparing preview…"}</div>;
 
   return <Dialog open={!!preview} onOpenChange={(open) => { if (!open) void closePreview(); }}>
-    <DialogContent showCloseButton={false} className="max-w-3xl border-white/10 bg-[#0f0f13]/95 text-foreground">
+    <DialogContent showCloseButton={false} className="max-h-[94vh] w-[98vw] max-w-[98vw] overflow-y-auto border-white/10 bg-[#0f0f13]/95 text-foreground sm:max-w-[min(98vw,120rem)]">
       {preview && <>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 break-all font-mono text-sm">{isVideo ? <Video className="h-4 w-4 text-violet-400" /> : <AudioLines className="h-4 w-4 text-violet-400" />}{preview.target.displayName}</DialogTitle>

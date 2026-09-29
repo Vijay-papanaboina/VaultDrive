@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MetaCard } from "@/components/meta-card";
 import { MetaDetailModal } from "@/components/meta-detail-modal";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -9,6 +9,7 @@ import { useCrypto } from "@/hooks/use-crypto";
 import type { ProgressiveMetaFile, DecryptedMeta } from "@/types";
 import { ChevronLeft, ChevronRight, FileX, KeyRound, RotateCcw } from "lucide-react";
 import { useSelection } from "@/components/selection-provider";
+import { revokeThumbnailUrls } from "@/lib/meta-decryption";
 
 interface MetaGridProps {
   files: ProgressiveMetaFile[];
@@ -128,13 +129,27 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
   const [savedOverrides, setSavedOverrides] = useState<Record<string, ProgressiveMetaFile>>({});
   const [page, setPage] = useState(1);
   const gridRef = useRef<HTMLDivElement | null>(null);
-  const { clearPassphrase } = useCrypto();
+  const savedOverridesRef = useRef<Record<string, ProgressiveMetaFile>>({});
+  const { clearPassphrase, registerSensitiveCleanup } = useCrypto();
   const { isSelectionMode, isFileSelected, toggleFileSelection } = useSelection();
 
   const displayedFiles = useMemo(
     () => files.map((file) => savedOverrides[file.driveFile.id] ?? file),
     [files, savedOverrides]
   );
+
+  useEffect(() => {
+    savedOverridesRef.current = savedOverrides;
+  }, [savedOverrides]);
+
+  const clearSensitiveState = useCallback(() => {
+    revokeThumbnailUrls(Object.values(savedOverridesRef.current));
+    savedOverridesRef.current = {};
+    setSelected(null);
+    setSavedOverrides({});
+  }, []);
+
+  useEffect(() => registerSensitiveCleanup(clearSensitiveState), [clearSensitiveState, registerSensitiveCleanup]);
 
   // Detect when the file set identity changes (sort/filter/search changes the head IDs or count).
   // replaceMetaFile keeps IDs/order/length stable during decryption, so this only fires on real set changes.

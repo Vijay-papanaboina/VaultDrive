@@ -61,7 +61,10 @@ export const MetaCard = memo(
     } = meta;
 
     const isClickable = isSelectionMode || (decrypted && !decryptError);
-    const mediaMime = (details?.extra?.mime_type as string | undefined) || inferMimeType(originalFileName);
+    // `originalFileName` is the opaque Drive sidecar stem until the payload is
+    // downloaded. The decrypted card name is the useful fallback for CLI files
+    // that predate the browser's mime_type field.
+    const mediaMime = (details?.extra?.mime_type as string | undefined) || inferMimeType(details?.name || originalFileName);
     const isMedia = !!mediaMime?.startsWith("audio/") || !!mediaMime?.startsWith("video/");
 
     return (

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:migrate": "pnpm dlx auth@1.6.23 migrate --config lib/auth.ts --yes"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
@@ -17,14 +18,15 @@
     "age-encryption": "^0.3.0",
     "argon2": "^0.45.0",
     "better-auth": "^1.6.23",
-    "better-sqlite3": "^12.11.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "fflate": "^0.8.3",
     "fuse.js": "^7.4.2",
     "hash-wasm": "^4.12.0",
     "lucide-react": "^1.24.0",
-    "next": "16.2.10",
+    "mp4box": "2.4.1",
+    "next": "16.3.4",
+    "pg": "^8.16.3",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "shadcn": "^4.13.0",
@@ -33,12 +35,12 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",
+    "@types/pg": "^8.15.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.10",
+    "eslint-config-next": "16.3.4",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

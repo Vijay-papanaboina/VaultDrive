@@ -28,7 +28,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { FileDownloadButton } from "@/components/file-download-button";
 import { MediaPreviewButton } from "@/components/media-preview-button";
@@ -112,9 +112,11 @@ function MetaDetailContent({
   onClose: () => void;
   onSaved?: (meta: DecryptedMeta) => void;
 }) {
-  const { getPassphrase } = useCrypto();
+  const { getPassphrase, registerSensitiveCleanup } = useCrypto();
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const operationGenerationRef = useRef(0);
+  const generatedPreviewUrlRef = useRef<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -129,19 +131,49 @@ function MetaDetailContent({
   const [thumbnailFilename, setThumbnailFilename] = useState(meta.thumbnailFilename);
   const [thumbnailMimeType, setThumbnailMimeType] = useState(meta.thumbnailMimeType);
   const [thumbnailDirty, setThumbnailDirty] = useState(false);
-  const previewUrl = useMemo(
-    () => thumbnailDirty
-      ? makeThumbnailUrl(thumbnailBytes, thumbnailMimeType)
-      : meta.thumbnailUrl,
-    [meta.thumbnailUrl, thumbnailBytes, thumbnailDirty, thumbnailMimeType]
-  );
+  const [dirtyPreviewUrl, setDirtyPreviewUrl] = useState<string | null>(null);
+  const previewUrl = thumbnailDirty ? dirtyPreviewUrl : meta.thumbnailUrl;
+
+  const releaseDirtyPreviewUrl = useCallback(() => {
+    const url = generatedPreviewUrlRef.current;
+    if (url) URL.revokeObjectURL(url);
+    generatedPreviewUrlRef.current = null;
+    setDirtyPreviewUrl(null);
+  }, []);
+
+  const setDirtyPreview = useCallback((bytes: Uint8Array | null, mimeType: string | null) => {
+    const previousUrl = generatedPreviewUrlRef.current;
+    if (previousUrl) URL.revokeObjectURL(previousUrl);
+    const nextUrl = makeThumbnailUrl(bytes, mimeType);
+    generatedPreviewUrlRef.current = nextUrl;
+    setDirtyPreviewUrl(nextUrl);
+  }, []);
+
+  const clearSensitiveState = useCallback(() => {
+    operationGenerationRef.current += 1;
+    releaseDirtyPreviewUrl();
+    setThumbnailBytes(null);
+    setThumbnailFilename(null);
+    setThumbnailMimeType(null);
+    setThumbnailDirty(false);
+    setIsSaving(false);
+    setIsEditing(false);
+    setSaveError(null);
+    setSavedMessage(null);
+    onClose();
+  }, [onClose, releaseDirtyPreviewUrl]);
 
   useEffect(() => {
-    if (!thumbnailDirty || !previewUrl) return;
-    return () => URL.revokeObjectURL(previewUrl);
-  }, [previewUrl, thumbnailDirty]);
+    const unregister = registerSensitiveCleanup(clearSensitiveState);
+    return () => {
+      operationGenerationRef.current += 1;
+      releaseDirtyPreviewUrl();
+      unregister();
+    };
+  }, [clearSensitiveState, registerSensitiveCleanup, releaseDirtyPreviewUrl]);
 
   async function handleThumbnailChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const generation = operationGenerationRef.current;
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
@@ -155,9 +187,12 @@ function MetaDetailContent({
       return;
     }
 
-    setThumbnailBytes(new Uint8Array(await file.arrayBuffer()));
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (generation !== operationGenerationRef.current) return;
+    setThumbnailBytes(bytes);
     setThumbnailFilename(meta.thumbnailFilename ?? file.name);
     setThumbnailMimeType(file.type || "image/webp");
+    setDirtyPreview(bytes, file.type || "image/webp");
     setThumbnailDirty(true);
     setSaveError(null);
   }
@@ -178,16 +213,26 @@ function MetaDetailContent({
     setThumbnailFilename(meta.thumbnailFilename);
     setThumbnailMimeType(meta.thumbnailMimeType);
     setThumbnailDirty(false);
+    releaseDirtyPreviewUrl();
     setSaveError(null);
     setIsEditing(false);
   }
 
   async function saveChanges() {
+    const generation = operationGenerationRef.current;
     const identity = getPassphrase();
     if (!identity) {
       setSaveError("Unlock the vault before saving metadata.");
       return;
     }
+    const ensureCurrent = () => {
+      if (
+        generation !== operationGenerationRef.current ||
+        identity !== getPassphrase()
+      ) {
+        throw new DOMException("Metadata save cancelled", "AbortError");
+      }
+    };
 
     const trimmedName = name.trim();
     if (!trimmedName) {
@@ -224,14 +269,19 @@ function MetaDetailContent({
         thumbnailBytes,
         thumbnailFilename,
       });
+      ensureCurrent();
       const updatedDriveFile = await updateMetaFile(
         meta.driveFile.id,
         encrypted,
         meta.driveFile.modifiedTime
       );
+      ensureCurrent();
       const savedThumbnailUrl = thumbnailDirty
-        ? makeThumbnailUrl(thumbnailBytes, thumbnailMimeType)
+        ? generatedPreviewUrlRef.current
         : meta.thumbnailUrl;
+      if (thumbnailDirty && !savedThumbnailUrl) {
+        throw new Error("Thumbnail preview was unavailable");
+      }
       const nextMeta: DecryptedMeta = {
         ...meta,
         driveFile: { ...meta.driveFile, ...updatedDriveFile },
@@ -242,20 +292,25 @@ function MetaDetailContent({
         thumbnailUrl: savedThumbnailUrl,
       };
 
+      ensureCurrent();
       updateMetadataCaches(queryClient, nextMeta);
       onSaved?.(nextMeta);
+      if (thumbnailDirty) generatedPreviewUrlRef.current = null;
+      setDirtyPreviewUrl(null);
       setThumbnailDirty(false);
       setSavedMessage("Metadata saved to Drive");
       setIsEditing(false);
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : "Failed to save metadata.");
+      if (generation === operationGenerationRef.current) {
+        setSaveError(error instanceof Error ? error.message : "Failed to save metadata.");
+      }
     } finally {
-      setIsSaving(false);
+      if (generation === operationGenerationRef.current) setIsSaving(false);
     }
   }
 
   const { details, originalFileName, driveFile } = meta;
-  const mediaMime = (details.extra?.mime_type as string | undefined) || inferMimeType(originalFileName);
+  const mediaMime = (details.extra?.mime_type as string | undefined) || inferMimeType(details.name || originalFileName);
   const isMedia = !!mediaMime?.startsWith("audio/") || !!mediaMime?.startsWith("video/");
   return (
     <div className="flex max-h-[95vh] w-full flex-col md:h-[75vh] md:flex-row">

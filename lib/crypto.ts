@@ -1,12 +1,17 @@
 "use client";
 
 import { Decrypter, Encrypter, identityToRecipient } from "age-encryption";
-import { unzipSync, zipSync } from "fflate";
+import { unzipSync, zipSync, type UnzipFileInfo } from "fflate";
 import { bech32 } from "@scure/base";
 import type { MetaDetails } from "@/types";
 import { argon2id } from "hash-wasm";
 
 export const IMAGE_EXTS = /\.(webp|jpg|jpeg|png|gif|avif|bmp|svg)$/i;
+const MAX_META_ARCHIVE_BYTES = 25 * 1024 * 1024;
+const MAX_META_ARCHIVE_ENTRIES = 2;
+const MAX_META_DETAILS_BYTES = 1024 * 1024;
+const MAX_META_THUMBNAIL_BYTES = MAX_META_ARCHIVE_BYTES - MAX_META_DETAILS_BYTES;
+const UNSAFE_ARCHIVE_ENTRY_NAME = /[\\/\u0000-\u001f\u007f]/;
 export function inferMimeType(filename: string): string | undefined {
   const ext = filename.toLowerCase().split(".").pop() || "";
   return ({ mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm", ogv: "video/ogg", mov: "video/quicktime", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", ogg: "audio/ogg", flac: "audio/flac", weba: "audio/webm" } as Record<string, string>)[ext];
@@ -25,6 +30,71 @@ function getMimeType(filename: string): string {
     svg: "image/svg+xml",
   };
   return map[ext] ?? "image/jpeg";
+}
+
+function validateMetaArchiveEntry(
+  file: UnzipFileInfo,
+  seenNames: Set<string>,
+  state: { entries: number; totalBytes: number; hasDetails: boolean; hasThumbnail: boolean },
+) {
+  const { name, size, originalSize, compression } = file;
+  state.entries += 1;
+  if (state.entries > MAX_META_ARCHIVE_ENTRIES) {
+    throw new Error("Meta archive has too many entries");
+  }
+  if (!name || name === "." || name === ".." || UNSAFE_ARCHIVE_ENTRY_NAME.test(name)) {
+    throw new Error("Meta archive has an unsafe entry name");
+  }
+  if (seenNames.has(name)) throw new Error("Meta archive contains duplicate entries");
+  seenNames.add(name);
+  if (!Number.isSafeInteger(size) || !Number.isSafeInteger(originalSize) || size < 0 || originalSize < 0 || size > MAX_META_ARCHIVE_BYTES) {
+    throw new Error("Meta archive has invalid entry sizes");
+  }
+  // Current uploads use stored entries (0); accept Deflate (8) for archives
+  // created by compatible older clients, but reject every other decoder.
+  if (compression !== 0 && compression !== 8) {
+    throw new Error("Meta archive uses an unsupported compression method");
+  }
+  if (compression === 0 && size !== originalSize) {
+    throw new Error("Meta archive has inconsistent stored entry sizes");
+  }
+
+  const isDetails = name === "details.json";
+  if (!isDetails && !IMAGE_EXTS.test(name)) {
+    throw new Error("Meta archive contains an unexpected entry");
+  }
+  if (isDetails) {
+    if (state.hasDetails || originalSize > MAX_META_DETAILS_BYTES) {
+      throw new Error("Meta archive has an invalid details.json entry");
+    }
+    state.hasDetails = true;
+  } else {
+    if (state.hasThumbnail || originalSize > MAX_META_THUMBNAIL_BYTES) {
+      throw new Error("Meta archive has an invalid thumbnail entry");
+    }
+    state.hasThumbnail = true;
+  }
+  state.totalBytes += originalSize;
+  if (state.totalBytes > MAX_META_ARCHIVE_BYTES) {
+    throw new Error("Meta archive expands beyond the allowed size");
+  }
+}
+
+function unzipMetaArchive(zipBytes: Uint8Array) {
+  if (zipBytes.byteLength > MAX_META_ARCHIVE_BYTES) {
+    throw new Error("Meta archive exceeds the allowed size");
+  }
+  const seenNames = new Set<string>();
+  const state = { entries: 0, totalBytes: 0, hasDetails: false, hasThumbnail: false };
+  const files = unzipSync(zipBytes, {
+    // fflate invokes this before allocating an entry's output buffer.
+    filter: (file) => {
+      validateMetaArchiveEntry(file, seenNames, state);
+      return true;
+    },
+  });
+  if (!state.hasDetails) throw new Error("details.json not found in meta zip");
+  return files;
 }
 
 export interface DecryptedZipResult {
@@ -111,13 +181,11 @@ export async function decryptMetaZip(
   const zipBytes = await d.decrypt(encryptedData);
 
   // Step 2: unzip
-  const files = unzipSync(zipBytes);
+  const files = unzipMetaArchive(zipBytes);
 
   // Step 3: parse details.json
   const detailsBytes = files["details.json"];
-  if (!detailsBytes) {
-    throw new Error("details.json not found in meta zip");
-  }
+  if (!detailsBytes) throw new Error("details.json not found in meta zip");
   const details: MetaDetails = JSON.parse(
     new TextDecoder().decode(detailsBytes)
   );
