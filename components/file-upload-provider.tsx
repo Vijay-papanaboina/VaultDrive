@@ -8,18 +8,18 @@ import {
   createResumablePayloadContext,
   encryptedPayloadSize,
   sealUploadContext,
-  sealUploadState,
   unsealUploadContext,
-  unsealUploadState,
   type PayloadDescriptor,
   type ResumablePayloadContext,
 } from "@/lib/resumable-payload";
 import { useCrypto } from "@/hooks/use-crypto";
+import {
+  directResumableUpload,
+  DRIVE_UPLOAD_CHUNK_BYTES,
+  validateDriveUploadSessionUrl,
+} from "@/lib/direct-drive-upload";
 
-const DRIVE_CHUNK_SIZE = 8 * 1024 * 1024;
-const STORAGE_KEY = "vaultdrive.uploads.v1";
 const FINALIZATION_ATTEMPTS = 3;
-const UPLOAD_SESSION_HEADER = "x-vault-upload-session";
 
 export type UploadStage = "preparing" | "meta" | "encrypting" | "uploading" | "retrying" | "finalizing" | "paused" | "complete" | "failed";
 
@@ -37,7 +37,7 @@ export interface UploadItem {
   resumable?: boolean;
 }
 
-interface PersistedUpload {
+interface UploadSession {
   id: string;
   folderId: string;
   filename: string;
@@ -92,43 +92,24 @@ function isSameSource(file: File, descriptor: PayloadDescriptor): boolean {
   return file.name === descriptor.filename && file.size === descriptor.size && file.lastModified === descriptor.lastModified;
 }
 
-function parseReceivedOffset(response: Response): number {
+class UploadProtocolError extends Error {}
+
+function parseReceivedOffset(response: Response, allowMissing = false): number {
   const range = response.headers.get("Range");
-  const match = range?.match(/bytes=0-(\d+)/i);
-  return match ? Number(match[1]) + 1 : 0;
+  if (range === null && allowMissing) return 0;
+  const match = range === null ? null : /^bytes=0-(\d+)$/.exec(range);
+  const end = match ? Number(match[1]) : NaN;
+  if (!Number.isSafeInteger(end) || end < 0) {
+    throw new UploadProtocolError("Google Drive did not confirm the uploaded byte range.");
+  }
+  return end + 1;
 }
 
 function replacementSessionUrl(response: Response): string | undefined {
   const location = response.headers.get("Location");
   if (!location) return undefined;
 
-  let url: URL;
-  try {
-    url = new URL(location);
-  } catch {
-    throw new Error("Drive returned an invalid resumable upload URL.");
-  }
-
-  const isDriveUploadPath = /^\/upload\/drive\/v3\/files(?:\/[A-Za-z0-9_-]+)?$/.test(url.pathname);
-  const uploadTypes = url.searchParams.getAll("uploadType");
-  const uploadIds = url.searchParams.getAll("upload_id");
-  if (
-    url.protocol !== "https:" ||
-    url.hostname !== "www.googleapis.com" ||
-    url.port ||
-    url.username ||
-    url.password ||
-    url.hash ||
-    !isDriveUploadPath ||
-    uploadTypes.length !== 1 ||
-    uploadTypes[0] !== "resumable" ||
-    uploadIds.length !== 1 ||
-    !/^[A-Za-z0-9_-]+$/.test(uploadIds[0])
-  ) {
-    throw new Error("Drive returned an invalid resumable upload URL.");
-  }
-
-  return url.toString();
+  return validateDriveUploadSessionUrl(location);
 }
 
 async function responseMessage(response: Response): Promise<string> {
@@ -171,33 +152,57 @@ async function finalizeLegacyPayload(metaFileId: string, payloadFileId: string):
   }
 }
 
-function proxyResumableUpload(
-  sessionUrl: string,
-  contentRange: string,
-  body: ArrayBuffer | undefined,
-  signal: AbortSignal
-): Promise<Response> {
-  const headers: Record<string, string> = {
-    "Content-Range": contentRange,
-    [UPLOAD_SESSION_HEADER]: sessionUrl,
-  };
-  if (body) headers["Content-Type"] = "application/octet-stream";
-  return fetch("/api/drive/upload/chunk", {
-    method: "POST",
-    headers,
-    ...(body ? { body } : {}),
-    signal,
-  });
+async function uploadEncryptedMeta(sessionUrl: string, encryptedMeta: Uint8Array, signal: AbortSignal): Promise<void> {
+  let offset = 0;
+  while (offset < encryptedMeta.byteLength) {
+    const endExclusive = Math.min(offset + DRIVE_UPLOAD_CHUNK_BYTES, encryptedMeta.byteLength);
+    const finalChunk = endExclusive === encryptedMeta.byteLength;
+    const response = await directResumableUpload(
+      sessionUrl,
+      `bytes ${offset}-${endExclusive - 1}/${encryptedMeta.byteLength}`,
+      asUploadBody(encryptedMeta.subarray(offset, endExclusive)),
+      signal
+    );
+    if (finalChunk) {
+      if (response.status !== 200 && response.status !== 201) {
+        throw new Error(`Google Drive rejected encrypted metadata (HTTP ${response.status}).`);
+      }
+      return;
+    }
+    if (response.status !== 308) {
+      throw new Error(`Google Drive did not accept the encrypted metadata chunk (HTTP ${response.status}).`);
+    }
+    const received = parseReceivedOffset(response);
+    if (received !== endExclusive) {
+      throw new UploadProtocolError("Google Drive confirmed an unexpected encrypted metadata range.");
+    }
+    offset = received;
+  }
 }
 
 export function FileUploadProvider({ children }: { children: React.ReactNode }) {
-  const { getPassphrase, hasPassphrase, keyVersion, registerSensitiveCleanup } = useCrypto();
-  const [uploadItems, setUploadItems] = useState<Record<string, UploadItem>>({});
-  const persistedRef = useRef<Record<string, PersistedUpload>>({});
+  const { getPassphrase, registerSensitiveCleanup } = useCrypto();
+  const [uploadItems, setUploadItemsState] = useState<Record<string, UploadItem>>({});
+  const uploadItemsRef = useRef<Record<string, UploadItem>>({});
+  const setUploadItems = useCallback((update: Record<string, UploadItem> | ((previous: Record<string, UploadItem>) => Record<string, UploadItem>)) => {
+    const next = typeof update === "function" ? update(uploadItemsRef.current) : update;
+    uploadItemsRef.current = next;
+    setUploadItemsState(next);
+  }, []);
+  const sessionsRef = useRef<Record<string, UploadSession>>({});
   const controllersRef = useRef(new Map<string, AbortController>());
   const setupControllersRef = useRef(new Map<string, AbortController>());
+  const cleanupControllersRef = useRef(new Map<string, AbortController>());
+  const remoteTargetsRef = useRef(new Map<string, { metaFileId: string; payloadFileId?: string }>());
+  const cleanupPromisesRef = useRef(new Map<string, Promise<void>>());
+  const cancelRequestedRef = useRef(new Set<string>());
   const readersRef = useRef(new Set<ReadableStreamDefaultReader<Uint8Array>>());
   const sensitiveGenerationRef = useRef(0);
+  const getPassphraseRef = useRef(getPassphrase);
+
+  useEffect(() => {
+    getPassphraseRef.current = getPassphrase;
+  }, [getPassphrase]);
 
   const clearSensitiveState = useCallback(() => {
     sensitiveGenerationRef.current += 1;
@@ -205,98 +210,105 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
     controllersRef.current.clear();
     setupControllersRef.current.forEach((controller) => controller.abort());
     setupControllersRef.current.clear();
+    cleanupControllersRef.current.forEach((controller) => controller.abort());
+    cleanupControllersRef.current.clear();
+    cleanupPromisesRef.current.clear();
+    remoteTargetsRef.current.clear();
+    cancelRequestedRef.current.clear();
     readersRef.current.forEach((reader) => void reader.cancel().catch(() => undefined));
     readersRef.current.clear();
-    // The localStorage records remain sealed for a later, explicit resume.
-    persistedRef.current = {};
+    sessionsRef.current = {};
     setUploadItems({});
-  }, []);
+  }, [setUploadItems]);
 
   useEffect(() => registerSensitiveCleanup(clearSensitiveState), [clearSensitiveState, registerSensitiveCleanup]);
+  useEffect(() => () => clearSensitiveState(), [clearSensitiveState]);
+  useEffect(() => {
+    try {
+      window.localStorage.removeItem("vaultdrive.uploads.v1");
+    } catch {
+      // Storage may be unavailable. Upload sessions remain memory-only.
+    }
+  }, []);
 
   const updateItem = useCallback((id: string, update: Partial<UploadItem>) => {
     setUploadItems((previous) => previous[id] ? { ...previous, [id]: { ...previous[id], ...update } } : previous);
-  }, []);
+  }, [setUploadItems]);
 
-  const savePersisted = useCallback(async (identity: string, generation: number) => {
-    const states = Object.values(persistedRef.current);
-    const sealed = await Promise.all(states.map(async (item) => ({ id: item.id, data: await sealUploadState(identity, item) })));
-    if (generation !== sensitiveGenerationRef.current) return;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(sealed));
-  }, []);
+  const cleanupRemoteTarget = useCallback((
+    id: string,
+    target: { metaFileId: string; payloadFileId?: string },
+    generation: number
+  ): Promise<void> => {
+    if (generation !== sensitiveGenerationRef.current) {
+      return Promise.reject(new DOMException("Upload paused", "AbortError"));
+    }
+    const pending = cleanupPromisesRef.current.get(id);
+    if (pending) return pending;
+    const controller = new AbortController();
+    cleanupControllersRef.current.set(id, controller);
 
-  useEffect(() => {
-    const identity = getPassphrase();
-    if (!hasPassphrase || !identity) return;
-    const generation = sensitiveGenerationRef.current;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (!raw) return;
-        const entries = JSON.parse(raw) as Array<{ id: string; data: string }>;
-        const restored: Record<string, PersistedUpload> = {};
-        const items: Record<string, UploadItem> = {};
-        for (const entry of entries) {
-          const state = await unsealUploadState<PersistedUpload>(identity, entry.data);
-          restored[state.id] = state;
-          items[state.id] = {
-            id: state.id, folderId: state.folderId, filename: state.filename, stage: "paused",
-            bytesUploaded: state.bytesUploaded, encryptedSize: state.encryptedSize, startedAt: Date.now(),
-            metaFileId: state.metaFileId, payloadFileId: state.payloadFileId, resumable: true,
-          };
-        }
-        if (!cancelled && generation === sensitiveGenerationRef.current) {
-          persistedRef.current = restored;
-          setUploadItems((previous) => ({ ...previous, ...items }));
-        }
-      } catch {
-        // State belongs to another passphrase or was damaged. Keep it unreadable.
+    const cleanup = (async () => {
+      const response = await fetch("/api/drive/upload/cleanup", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(target),
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error("Remote cleanup failed. Retry cancellation later.");
+      const current = remoteTargetsRef.current.get(id);
+      if (current?.metaFileId === target.metaFileId && current.payloadFileId === target.payloadFileId) {
+        remoteTargetsRef.current.delete(id);
       }
     })();
-    return () => { cancelled = true; };
-  }, [getPassphrase, hasPassphrase, keyVersion]);
+    cleanupPromisesRef.current.set(id, cleanup);
+    void cleanup.finally(() => {
+      if (cleanupPromisesRef.current.get(id) === cleanup) cleanupPromisesRef.current.delete(id);
+      if (cleanupControllersRef.current.get(id) === controller) cleanupControllersRef.current.delete(id);
+    }).catch(() => undefined);
+    return cleanup;
+  }, []);
 
   const uploadPayload = useCallback(async (
     id: string,
-    identity: string,
     file: File,
     payloadName: string,
     context: ResumablePayloadContext,
-    state: PersistedUpload,
+    state: UploadSession,
     generation: number,
+    parentSignal?: AbortSignal,
   ) => {
+    const controller = new AbortController();
+    const requestSignal = parentSignal ? AbortSignal.any([controller.signal, parentSignal]) : controller.signal;
     const ensureCurrent = () => {
-      if (generation !== sensitiveGenerationRef.current) {
+      if (generation !== sensitiveGenerationRef.current || controller.signal.aborted || parentSignal?.aborted) {
         throw new DOMException("Upload paused", "AbortError");
       }
     };
-    ensureCurrent();
-    const controller = new AbortController();
+    if (controllersRef.current.has(id)) throw new Error("This upload is already active.");
     controllersRef.current.set(id, controller);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
+      ensureCurrent();
       const acceptReplacementSessionUrl = async (response: Response) => {
         const replacement = replacementSessionUrl(response);
         if (!replacement || replacement === state.sessionUrl) return;
         state.sessionUrl = replacement;
-        persistedRef.current[id] = state;
-        await savePersisted(identity, generation);
-        ensureCurrent();
+        sessionsRef.current[id] = state;
       };
 
       const queryStatus = async () => {
-        const response = await proxyResumableUpload(
+        const response = await directResumableUpload(
           state.sessionUrl,
           `bytes */${state.encryptedSize}`,
           undefined,
-          controller.signal,
+          requestSignal,
         );
-        await acceptReplacementSessionUrl(response);
+        acceptReplacementSessionUrl(response);
         ensureCurrent();
         if (response.ok) return { complete: true, offset: state.encryptedSize };
-        if (response.status !== 308) throw new Error(await responseMessage(response));
-        const offset = parseReceivedOffset(response);
+        if (response.status !== 308) throw new Error(`Google Drive rejected the upload status check (HTTP ${response.status}).`);
+        const offset = parseReceivedOffset(response, true);
         if (!Number.isSafeInteger(offset) || offset < 0 || offset > state.encryptedSize) {
           throw new Error("Drive returned an invalid upload offset.");
         }
@@ -310,8 +322,7 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
         ensureCurrent();
         offset = status.offset;
         state.bytesUploaded = offset;
-        persistedRef.current[id] = state;
-        await savePersisted(identity, generation);
+        sessionsRef.current[id] = state;
         ensureCurrent();
         updateItem(id, { stage: "encrypting", bytesUploaded: offset, error: undefined });
 
@@ -329,12 +340,12 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
               size = carried.byteLength;
               carried = new Uint8Array(0);
             }
-            while (size < DRIVE_CHUNK_SIZE) {
+            while (size < DRIVE_UPLOAD_CHUNK_BYTES) {
               const { done, value } = await encryptedReader.read();
               ensureCurrent();
               if (done) break;
               if (!value?.byteLength) continue;
-              const needed = DRIVE_CHUNK_SIZE - size;
+              const needed = DRIVE_UPLOAD_CHUNK_BYTES - size;
               if (value.byteLength > needed) {
                 parts.push(value.subarray(0, needed));
                 carried = value.subarray(needed);
@@ -358,26 +369,35 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
               updateItem(id, { stage: attempts ? "retrying" : "uploading", bytesUploaded: chunkStart + sentFrom });
               const body = chunk.subarray(sentFrom);
               try {
-                const response = await proxyResumableUpload(
+                const response = await directResumableUpload(
                   state.sessionUrl,
                   `bytes ${chunkStart + sentFrom}-${chunkStart + chunk.byteLength - 1}/${state.encryptedSize}`,
                   asUploadBody(body),
-                  controller.signal,
+                  requestSignal,
                 );
-                await acceptReplacementSessionUrl(response);
+                acceptReplacementSessionUrl(response);
                 ensureCurrent();
-                if (response.ok) {
+                if (response.status === 200 || response.status === 201) {
+                  if (chunkStart + chunk.byteLength !== state.encryptedSize) {
+                    throw new UploadProtocolError("Google Drive completed a non-final encrypted payload chunk.");
+                  }
                   offset = state.encryptedSize;
                   sentFrom = chunk.byteLength;
                   break;
                 }
-                if (response.status !== 308) throw new Error(await responseMessage(response));
+                if (response.status !== 308) throw new Error(`Google Drive rejected the encrypted payload chunk (HTTP ${response.status}).`);
                 const received = parseReceivedOffset(response);
-                if (received < chunkStart || received > chunkStart + chunk.byteLength) throw new Error("Drive returned an unexpected upload offset.");
+                if (received < chunkStart || received > chunkStart + chunk.byteLength) {
+                  throw new UploadProtocolError("Google Drive confirmed an unexpected upload offset.");
+                }
+                if (received <= chunkStart + sentFrom) {
+                  throw new UploadProtocolError("Google Drive did not advance the confirmed upload offset.");
+                }
                 sentFrom = received - chunkStart;
                 offset = received;
               } catch (error) {
-                if (controller.signal.aborted) throw error;
+                if (controller.signal.aborted || parentSignal?.aborted) throw error;
+                if (error instanceof UploadProtocolError) throw error;
                 if (attempts++ >= 3) throw error;
                 const retryStatus = await queryStatus();
                 ensureCurrent();
@@ -390,8 +410,7 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
               }
             }
             state.bytesUploaded = offset;
-            persistedRef.current[id] = state;
-            await savePersisted(identity, generation);
+            sessionsRef.current[id] = state;
             ensureCurrent();
             updateItem(id, { bytesUploaded: offset, stage: "encrypting" });
           }
@@ -408,14 +427,15 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
         await finalizeLegacyPayload(state.metaFileId, state.payloadFileId);
         ensureCurrent();
       }
-      delete persistedRef.current[id];
-      await savePersisted(identity, generation);
+      delete sessionsRef.current[id];
       ensureCurrent();
+      remoteTargetsRef.current.delete(id);
       updateItem(id, { stage: "complete", bytesUploaded: offset, resumable: false });
     } catch (error) {
       const message = uploadErrorMessage(error, state.bytesUploaded >= state.encryptedSize);
+      const aborted = controller.signal.aborted || parentSignal?.aborted === true;
       if (generation === sensitiveGenerationRef.current) {
-        updateItem(id, { stage: controller.signal.aborted ? "paused" : "failed", error: controller.signal.aborted ? "Upload paused." : message, resumable: true });
+        updateItem(id, { stage: aborted ? "paused" : "failed", error: aborted ? "Upload paused." : message, resumable: true });
       }
       throw new Error(message);
     } finally {
@@ -428,113 +448,234 @@ export function FileUploadProvider({ children }: { children: React.ReactNode }) 
         controllersRef.current.delete(id);
       }
     }
-  }, [savePersisted, updateItem]);
+  }, [updateItem]);
 
   const startUpload = useCallback(async (input: NewUpload, onStarted?: (id: string) => void) => {
     const generation = sensitiveGenerationRef.current;
+    const id = crypto.randomUUID();
+    const setupController = new AbortController();
     const ensureCurrent = () => {
-      if (generation !== sensitiveGenerationRef.current) {
+      if (generation !== sensitiveGenerationRef.current || setupController.signal.aborted) {
         throw new DOMException("Upload paused", "AbortError");
       }
     };
-    const identity = getPassphrase();
-    if (!identity) throw new Error("Unlock the vault before uploading.");
-    const id = crypto.randomUUID();
-    onStarted?.(id);
-    const setupController = new AbortController();
     setupControllersRef.current.set(id, setupController);
     const descriptor: PayloadDescriptor = { filename: input.file.name, size: input.file.size, lastModified: input.file.lastModified };
-    updateItem(id, { id, folderId: input.folderId, filename: input.payloadName, stage: "preparing", bytesUploaded: 0, encryptedSize: 0, startedAt: Date.now() });
+    let createdMetaFileId: string | undefined;
+    let createdPayloadFileId: string | undefined;
+    let sessionReady = false;
+    setUploadItems((previous) => ({
+      ...previous,
+      [id]: {
+        id,
+        folderId: input.folderId,
+        filename: input.payloadName,
+        stage: "preparing",
+        bytesUploaded: 0,
+        encryptedSize: 0,
+        startedAt: Date.now(),
+      },
+    }));
     try {
+      ensureCurrent();
+      const identity = getPassphraseRef.current();
+      if (!identity) throw new Error("Unlock the vault before uploading.");
+      onStarted?.(id);
+      ensureCurrent();
       const context = await createResumablePayloadContext(identity);
       ensureCurrent();
       const encryptedSize = encryptedPayloadSize(input.file, input.payloadName, context);
       updateItem(id, { stage: "meta", encryptedSize });
       const encryptedMeta = await encryptMetaZip(identity, { details: input.details, thumbnailBytes: input.thumbnailBytes, thumbnailFilename: input.thumbnailFilename });
       ensureCurrent();
-      const metaHeaders: Record<string, string> = {
-        "Content-Type": "application/octet-stream",
-        "x-vault-folder-id": input.folderId,
-      };
-      if (input.opaqueId) metaHeaders["x-vault-opaque-id"] = input.opaqueId;
-      const metaResponse = await fetch("/api/drive/upload/meta", { method: "POST", headers: metaHeaders, body: asUploadBody(encryptedMeta), signal: setupController.signal });
+      const metaResponse = await fetch("/api/drive/upload/meta", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folderId: input.folderId, encryptedMetaSize: encryptedMeta.byteLength, opaqueId: input.opaqueId }),
+        signal: setupController.signal,
+      });
       ensureCurrent();
       if (!metaResponse.ok) throw new Error(await responseMessage(metaResponse));
-      const meta = await metaResponse.json() as { metaFile: { id: string }; opaqueId: string };
-      const sessionResponse = await fetch("/api/drive/upload/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ metaFileId: meta.metaFile.id, encryptedSize }), signal: setupController.signal });
+      const meta = await metaResponse.json() as { metaFile?: { id?: unknown }; sessionUrl?: unknown };
+      if (typeof meta.metaFile?.id !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(meta.metaFile.id)) {
+        throw new Error("Drive returned an invalid metadata upload session.");
+      }
+      createdMetaFileId = meta.metaFile.id;
+      const remoteTarget = { metaFileId: createdMetaFileId };
+      remoteTargetsRef.current.set(id, remoteTarget);
+      updateItem(id, { stage: "meta", metaFileId: createdMetaFileId });
+      if (typeof meta.sessionUrl !== "string") throw new Error("Drive returned an invalid metadata upload session.");
+      const metaSessionUrl = validateDriveUploadSessionUrl(meta.sessionUrl);
+      await uploadEncryptedMeta(metaSessionUrl, encryptedMeta, setupController.signal);
+      ensureCurrent();
+
+      const metaCompleteResponse = await fetch("/api/drive/upload/meta-complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ metaFileId: createdMetaFileId }),
+        signal: setupController.signal,
+      });
+      ensureCurrent();
+      if (!metaCompleteResponse.ok) throw new Error(await responseMessage(metaCompleteResponse));
+
+      const sessionResponse = await fetch("/api/drive/upload/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ metaFileId: createdMetaFileId, encryptedSize }), signal: setupController.signal });
       ensureCurrent();
       if (!sessionResponse.ok) throw new Error(await responseMessage(sessionResponse));
       const session = await sessionResponse.json() as { payloadFileId: string; sessionUrl: string; finalizationRequired?: boolean };
-      const state: PersistedUpload = {
-        id, folderId: input.folderId, filename: input.payloadName, descriptor, sessionUrl: session.sessionUrl,
-        metaFileId: meta.metaFile.id, payloadFileId: session.payloadFileId, encryptedSize, bytesUploaded: 0,
+      if (typeof session.payloadFileId !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(session.payloadFileId)) {
+        throw new Error("Drive returned an invalid payload upload session.");
+      }
+      createdPayloadFileId = session.payloadFileId;
+      remoteTargetsRef.current.set(id, { metaFileId: createdMetaFileId, payloadFileId: createdPayloadFileId });
+      updateItem(id, { metaFileId: createdMetaFileId, payloadFileId: createdPayloadFileId });
+      const sessionUrl = validateDriveUploadSessionUrl(session.sessionUrl);
+      const state: UploadSession = {
+        id, folderId: input.folderId, filename: input.payloadName, descriptor, sessionUrl,
+        metaFileId: createdMetaFileId, payloadFileId: createdPayloadFileId, encryptedSize, bytesUploaded: 0,
         context: await sealUploadContext(identity, context), finalizationRequired: session.finalizationRequired,
       };
       ensureCurrent();
-      persistedRef.current[id] = state;
-      await savePersisted(identity, generation);
-      ensureCurrent();
+      sessionsRef.current[id] = state;
+      sessionReady = true;
       updateItem(id, { stage: "encrypting", metaFileId: state.metaFileId, payloadFileId: state.payloadFileId, resumable: true });
-      await uploadPayload(id, identity, input.file, input.payloadName, context, state, generation);
+      await uploadPayload(id, input.file, input.payloadName, context, state, generation, setupController.signal);
     } catch (error) {
       const message = uploadErrorMessage(error);
-      if (generation === sensitiveGenerationRef.current) updateItem(id, { stage: "failed", error: message });
+      if (generation === sensitiveGenerationRef.current) {
+        let cleanupFailed = false;
+        const remoteTarget = remoteTargetsRef.current.get(id);
+        const target = remoteTarget ?? (createdMetaFileId
+          ? { metaFileId: createdMetaFileId, ...(createdPayloadFileId ? { payloadFileId: createdPayloadFileId } : {}) }
+          : undefined);
+        if (!sessionReady) {
+          const alreadyCleanedByCancellation = cancelRequestedRef.current.has(id) && !remoteTarget;
+          if (target && !alreadyCleanedByCancellation) {
+            delete sessionsRef.current[id];
+            try {
+              await cleanupRemoteTarget(id, target, generation);
+            } catch {
+              cleanupFailed = true;
+            }
+          }
+          if (generation === sensitiveGenerationRef.current) {
+            if (cancelRequestedRef.current.has(id) && !cleanupFailed) {
+              delete sessionsRef.current[id];
+              remoteTargetsRef.current.delete(id);
+              setUploadItems((previous) => { const next = { ...previous }; delete next[id]; return next; });
+            } else if (cleanupFailed) {
+              updateItem(id, {
+                stage: "failed",
+                error: `${message} Remote cleanup failed; retry cancellation later.`,
+                metaFileId: target?.metaFileId,
+                payloadFileId: target?.payloadFileId,
+                resumable: true,
+              });
+            } else {
+              updateItem(id, {
+                stage: "failed",
+                error: message,
+                metaFileId: undefined,
+                payloadFileId: undefined,
+                resumable: false,
+              });
+            }
+          }
+        }
+      }
       throw new Error(message);
     } finally {
       if (setupControllersRef.current.get(id) === setupController) {
         setupControllersRef.current.delete(id);
       }
+      if (setupController.signal.aborted) cancelRequestedRef.current.delete(id);
     }
-  }, [getPassphrase, savePersisted, updateItem, uploadPayload]);
+  }, [cleanupRemoteTarget, setUploadItems, updateItem, uploadPayload]);
 
   const resumeUpload = useCallback(async (id: string, file: File) => {
+    if (setupControllersRef.current.has(id) || controllersRef.current.has(id)) {
+      throw new Error("This upload is already active.");
+    }
     const generation = sensitiveGenerationRef.current;
-    const identity = getPassphrase();
-    const state = persistedRef.current[id];
-    if (!identity || !state) throw new Error("This upload can no longer be resumed.");
-    if (!isSameSource(file, state.descriptor)) throw new Error("Choose the same original file to resume this upload.");
-    const context = await unsealUploadContext(identity, state.context);
-    if (generation !== sensitiveGenerationRef.current) throw new DOMException("Upload paused", "AbortError");
-    updateItem(id, { stage: "encrypting", error: undefined });
-    await uploadPayload(id, identity, file, state.filename, context, state, generation);
-  }, [getPassphrase, updateItem, uploadPayload]);
+    const setupController = new AbortController();
+    setupControllersRef.current.set(id, setupController);
+    try {
+      if (generation !== sensitiveGenerationRef.current || setupController.signal.aborted) {
+        throw new DOMException("Upload paused", "AbortError");
+      }
+      const identity = getPassphraseRef.current();
+      const state = sessionsRef.current[id];
+      if (!identity || !state) throw new Error("This upload can no longer be resumed.");
+      if (!isSameSource(file, state.descriptor)) throw new Error("Choose the same original file to resume this upload.");
+      const context = await unsealUploadContext(identity, state.context);
+      if (generation !== sensitiveGenerationRef.current || setupController.signal.aborted) {
+        throw new DOMException("Upload paused", "AbortError");
+      }
+      updateItem(id, { stage: "encrypting", error: undefined });
+      await uploadPayload(id, file, state.filename, context, state, generation, setupController.signal);
+    } finally {
+      if (setupControllersRef.current.get(id) === setupController) {
+        setupControllersRef.current.delete(id);
+      }
+      if (setupController.signal.aborted) cancelRequestedRef.current.delete(id);
+    }
+  }, [updateItem, uploadPayload]);
 
   const cancelUpload = useCallback(async (id: string) => {
+    const generation = sensitiveGenerationRef.current;
+    cancelRequestedRef.current.add(id);
+    setupControllersRef.current.get(id)?.abort();
     controllersRef.current.get(id)?.abort();
-    const state = persistedRef.current[id];
-    if (state) {
-      let cleanupError: Error | undefined;
+    const state = sessionsRef.current[id];
+    const item = uploadItems[id];
+    const target = remoteTargetsRef.current.get(id) ?? (state
+      ? { metaFileId: state.metaFileId, payloadFileId: state.payloadFileId }
+      : item?.metaFileId
+        ? { metaFileId: item.metaFileId, ...(item.payloadFileId ? { payloadFileId: item.payloadFileId } : {}) }
+        : undefined);
+    const hasRunner = () => setupControllersRef.current.has(id) || controllersRef.current.has(id);
+    if (target && generation === sensitiveGenerationRef.current) {
       try {
-        const response = await fetch("/api/drive/upload/cleanup", {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ metaFileId: state.metaFileId, payloadFileId: state.payloadFileId }),
-        });
-        if (!response.ok) cleanupError = new Error(await responseMessage(response));
-      } catch (error) {
-        cleanupError = new Error(uploadErrorMessage(error));
-      }
-
-      if (cleanupError) {
+        await cleanupRemoteTarget(id, target, generation);
+      } catch {
+        if (generation !== sensitiveGenerationRef.current) return;
         updateItem(id, {
           stage: "failed",
-          error: `Remote cleanup failed; retry cancellation later: ${cleanupError.message}`,
+          error: "Remote cleanup failed; retry cancellation later.",
+          metaFileId: target.metaFileId,
+          payloadFileId: target.payloadFileId,
           resumable: true,
         });
-        const identity = getPassphrase();
-        if (identity) await savePersisted(identity, sensitiveGenerationRef.current);
+        if (!hasRunner()) cancelRequestedRef.current.delete(id);
         return;
       }
-      delete persistedRef.current[id];
-      const identity = getPassphrase();
-      if (identity) await savePersisted(identity, sensitiveGenerationRef.current);
+    }
+    if (generation !== sensitiveGenerationRef.current) return;
+    if (state) {
+      delete sessionsRef.current[id];
+      remoteTargetsRef.current.delete(id);
     }
     setUploadItems((previous) => { const next = { ...previous }; delete next[id]; return next; });
-  }, [getPassphrase, savePersisted, updateItem]);
+    if (!hasRunner()) cancelRequestedRef.current.delete(id);
+  }, [setUploadItems, updateItem, uploadItems, cleanupRemoteTarget]);
 
   const clearUploadHistory = useCallback(() => {
-    setUploadItems((previous) => Object.fromEntries(Object.entries(previous).filter(([, item]) => item.stage !== "complete")));
-  }, []);
+    const runningIds = new Set([
+      ...setupControllersRef.current.keys(),
+      ...controllersRef.current.keys(),
+      ...cleanupControllersRef.current.keys(),
+    ]);
+    const clearableIds = Object.values(uploadItemsRef.current)
+      .filter((item) => (item.stage === "complete" || item.stage === "failed") && !runningIds.has(item.id))
+      .map((item) => item.id);
+    if (clearableIds.length === 0) return;
+
+    for (const id of clearableIds) {
+      delete sessionsRef.current[id];
+      remoteTargetsRef.current.delete(id);
+    }
+    const ids = new Set(clearableIds);
+    setUploadItems((previous) => Object.fromEntries(Object.entries(previous).filter(([id]) => !ids.has(id))));
+  }, [setUploadItems]);
 
   return <FileUploadContext.Provider value={{ uploadItems, startUpload, resumeUpload, cancelUpload, clearUploadHistory }}>{children}</FileUploadContext.Provider>;
 }

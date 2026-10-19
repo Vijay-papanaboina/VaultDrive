@@ -1,6 +1,6 @@
 # Routes and Components
 
-The Encrypted GDrive project uses the Next.js App Router. The backend APIs are designed to act as secure proxies that attach Google OAuth tokens to Google Drive API requests, ensuring the frontend client can perform cryptographic operations without exposing keys to the storage layer.
+The Encrypted GDrive project uses the Next.js App Router. Authenticated routes handle folder and metadata operations and create small JSON upload/download sessions. Original encrypted payload downloads, preview Range reads, and resumable upload chunks then move directly between the browser and Google Drive.
 
 ## Page Routes
 
@@ -10,15 +10,15 @@ The Encrypted GDrive project uses the Next.js App Router. The backend APIs are d
 - `/app/drive/[folderId]/page.tsx`: The folder browser page that mounts `FolderView` to fetch, decrypt, and display `.meta` items in a specific directory.
 - `/app/drive/[folderId]/search/page.tsx`: Recursive search page that mounts `SearchView` to recursively fetch, decrypt, and display all files under a selected folder and its subdirectories.
 
-## API Routes (Google Drive Proxy)
+## API Routes (Auth, Control, and Metadata)
 
-Because browser clients cannot safely store Google Drive OAuth tokens indefinitely, the Next.js API acts as a middleman. Better Auth securely manages the user's session (using Better SQLite3), and the API routes append the valid Google Drive access token to upstream requests.
+Better Auth stores application sessions and OAuth credentials in PostgreSQL through the `pg` pool. Google refresh and write credentials remain server-side. For payload reads, the server requests a separate token with exactly the `drive.readonly` scope and returns it only with a validated JSON download session. Browser-facing Better Auth access-token and refresh-token paths are disabled, while server-side auth APIs remain available.
 
-- `/api/auth/[...all]/route.ts`: Better Auth endpoints managing Google OAuth, session cookies, and local database connections.
+- `/api/auth/[...all]/route.ts`: Better Auth endpoints managing Google OAuth, session cookies, and PostgreSQL connections. HTTP access-token and refresh-token paths are disabled.
 - `/api/drive/folders/route.ts`: Proxies requests to `lib/google-drive.ts` (`listFolders`). Queries the Google Drive API for folder structures within a specified parent ID.
-- `/api/drive/meta/route.ts`: Queries the list of `.meta` files inside a given parent folder.
-- `/api/drive/meta/[fileId]/route.ts`: `GET` fetches raw encrypted `.meta` bytes. `PUT` accepts an already encrypted `application/octet-stream` body and replaces only that Drive file's content after checking the optional `If-Unmodified-Since` value.
-- `/api/drive/payload/[metaFileId]/route.ts`: Resolves the payload beside a `.meta` file in the same Drive folder, fetches its raw age-encrypted bytes, and returns them without decrypting.
+- `/api/drive/meta/route.ts`: Queries the list of `.meta` files inside a given parent folder and hides incomplete metadata uploads.
+- `/api/drive/meta/[fileId]/route.ts`: `GET` fetches bounded encrypted `.meta` bytes. `PUT` remains a separate bounded proxy operation that accepts an already encrypted `application/octet-stream` body and replaces only that Drive file's content after checking the optional `If-Unmodified-Since` value.
+- `/api/drive/payload/[metaFileId]/route.ts`: Authenticated `POST` resolves the securely paired payload and creates a Google `files.download` operation. It polls pending operations server-side and returns JSON with a validated `downloadUri`, encrypted size, resource key when present, and a short-lived `drive.readonly` token. The browser sends the resource key on direct Google requests when present. The route never fetches or relays payload bytes. `GET` returns 405, with no proxy fallback.
 - `/api/drive/path/route.ts`: Resolves folder path lineage by walking up the parent tree in Google Drive, returning breadcrumb data.
 
 ## Shared Client Utilities
@@ -29,6 +29,10 @@ Several client-side helpers are now shared across both the normal folder view an
 - `lib/drive-path.ts`: Shared breadcrumb-to-relative-path formatter.
 - `lib/meta-decryption.ts`: Shared worker/decrypt/cache-update helpers used by both decryption hooks.
 - `lib/crypto.ts`: Decrypts metadata archives and rebuilds/encrypts edited `details.json` plus the thumbnail entirely in the browser.
+- `lib/drive-download-token.ts`: Uses Better Auth's server-side OAuth refresh grant to mint a token requesting exactly `https://www.googleapis.com/auth/drive.readonly`, then checks the returned scope. The token is not persisted or returned from broad access-token APIs.
+- `lib/direct-payload-source.ts`: Keeps one download session in a per-source memory closure, fetches payload data directly from Google Drive, and renews near token expiry or once after a 401, 403, 404, or 410 response. It pins payload ID and size across renewal and never falls back to an app byte proxy.
+- `lib/random-access-age-reader.ts`: Uses the direct payload source for bounded encrypted ranges and retains strict 206, byte-count, and content-range validation. When Google CORS hides `Content-Range`, the source checks `Content-Length` against the requested range and pinned encrypted size, then synthesizes the header locally.
+- `lib/direct-drive-upload.ts`: Validates Google resumable upload capability URLs and sends bounded chunks directly to Google Drive without a browser write bearer token. It requests `X-GUploader-No-308: yes` and normalizes Google's exposed status override locally so incomplete uploads cannot become browser redirects.
 - `hooks/use-drive-file-browser-state.ts`: Shared inline search and sort state for the file browser shell.
 - `hooks/use-decryption-error-prompt.ts`: Shared modal-open / dismiss / stop / re-enter behavior for decryption failures.
 
@@ -75,18 +79,25 @@ The UI is broken down into specific interactive client components ensuring optim
    - Renders a paginated grid of `MetaCard` elements (32 items per page), empty states, error states, and the detail modal.
 
 9. `FileDownloadProvider` and `FileDownloadButton`:
-   - Share single-file and sequential selected-file downloads across cards, detail modals, and the header.
-   - Display resolving, downloading, streaming/decrypting, success, and retry states. Supported browsers write decrypted chunks directly to disk; other browsers use a Blob fallback.
+   - Share one FIFO download queue across cards, detail modals, and the header, with up to three active files.
+   - Request session JSON from the app, then fetch encrypted payload bytes directly from Google Drive. The short-lived read-only token stays in the source closure, not localStorage, sessionStorage, OPFS, or React Query.
+   - Display queued, paused, preparing, decrypting/writing, finalizing, success, and retry states. Pause retains the committed plaintext offset, and resume continues from that point. Recoverable read or connection failures can Continue from the committed offset; write or integrity failures require discard and restart. Supported browsers write decrypted chunks directly to disk; other browsers use a Blob fallback.
 
-10. `MetaDetailModal`:
+10. `MediaPreviewProvider` and the random-access age reader:
+   - Request session JSON from the app, then make direct Google Drive Range requests. `partialDownloadAllowed` must be true, and a real 206 response plus exposed `Content-Length` must match the requested range and pinned encrypted size. The source supplies a locally synthesized `Content-Range` only when CORS hides that header.
+   - Existing MP4Box/MSE seek, preload, and playback loops are unchanged. MP4 preview uses bounded in-memory ranges and the optional encrypted preview cache. Native and fallback playback can use temporary plaintext browser caching where needed.
+
+11. `MetaDetailModal`:
    - Displays decrypted metadata and provides an edit mode for all current `details.json` fields plus thumbnail replacement/removal.
    - Uploads only the new encrypted `.meta` bytes; it never renames or updates the paired original payload.
 
-11. Upload routes:
-   - `POST /api/drive/upload/meta` creates encrypted opaque metadata in the selected folder.
-   - `POST /api/drive/upload/session` creates its temporary opaque payload and resumable Drive session.
-   - The browser uploads encrypted payload chunks directly to that session, then `POST /api/drive/upload/complete` names the payload `<id>`.
-   - `DELETE /api/drive/upload/cleanup` removes a user-cancelled pair. Original names and plaintext never reach these routes.
+12. Upload routes:
+   - `POST /api/drive/upload/meta` accepts JSON containing the folder ID, encrypted metadata size, and optional opaque ID. It creates an empty `<id>.meta` file and returns its Google resumable session URL, without receiving metadata bytes.
+   - The browser uploads encrypted `.meta` chunks directly to Google Drive, then calls `POST /api/drive/upload/meta-complete`. The server verifies the exact expected size and marks metadata ready before any payload session can be created.
+   - `POST /api/drive/upload/session` creates the opaque payload and returns its resumable Google session. The browser age-encrypts the original in bounded chunks and sends direct PUT requests without a write bearer token.
+   - `POST /api/drive/upload/complete` remains for legacy payload finalization. `DELETE /api/drive/upload/cleanup` safely removes known unfinished metadata or payload targets, can recover an unfinished payload's bound ID from its metadata ID when a session response was lost, and refuses completed or mismatched targets.
+   - Upload control calls accept JSON bodies of at most 8 KiB. `POST /api/drive/upload/chunk` returns 410; there is no app-side chunk relay. Original names and plaintext never reach these routes.
+   - Upload session state and sealed age context are held in provider memory only. Reload, reopening the site, or locking the vault ends the ability to resume; clearing upload history does not delete Drive files.
 
 ## Data Hooks
 
@@ -135,8 +146,12 @@ graph TD
     MetaDetailModal --> FileDownloadButton
     
     NextAPI[Next.js API Routes] -.->|Manages Session| AuthProvider
-    NextAPI -.->|Fetches Blobs| GoogleDrive[Google Drive API]
+    NextAPI -.->|Lists folders and proxies bounded metadata| GoogleDrive[Google Drive API]
     FolderView -.->|Requests Data| NextAPI
     SearchView -.->|Requests Data| NextAPI
-    FileDownloadProvider -.->|Requests encrypted payload| NextAPI
+    FileDownloadProvider -.->|Requests session JSON| NextAPI
+    FileDownloadProvider -.->|Direct encrypted GET| GoogleDrive
+    MediaPreviewProvider -.->|Direct encrypted Range GET| GoogleDrive
+    FileUploadProvider -.->|Requests upload session JSON| NextAPI
+    FileUploadProvider -.->|Direct encrypted PUT| GoogleDrive
 ```

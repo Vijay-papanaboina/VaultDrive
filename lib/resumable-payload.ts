@@ -228,24 +228,3 @@ export async function unsealUploadContext(identity: string, sealed: string): Pro
   const parsed = JSON.parse(new TextDecoder().decode(decrypted)) as Record<string, string>;
   return { header: fromBase64(parsed.header), nonce: fromBase64(parsed.nonce), fileKey: fromBase64(parsed.fileKey) };
 }
-
-export async function sealUploadState(identity: string, state: unknown): Promise<string> {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encrypted = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: asArrayBuffer(iv) },
-    await stateKey(identity),
-    asArrayBuffer(new TextEncoder().encode(JSON.stringify(state)))
-  );
-  return `${toBase64(iv)}.${toBase64(new Uint8Array(encrypted))}`;
-}
-
-export async function unsealUploadState<T>(identity: string, sealed: string): Promise<T> {
-  const [ivValue, encryptedValue] = sealed.split(".");
-  if (!ivValue || !encryptedValue) throw new Error("Stored upload state is invalid.");
-  const decrypted = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: asArrayBuffer(fromBase64(ivValue)) },
-    await stateKey(identity),
-    asArrayBuffer(fromBase64(encryptedValue))
-  );
-  return JSON.parse(new TextDecoder().decode(decrypted)) as T;
-}

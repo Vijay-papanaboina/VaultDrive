@@ -4,6 +4,7 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { decryptPayloadStream } from "@/lib/crypto";
 import { EncryptedPreviewCache } from "@/lib/encrypted-preview-cache";
 import { MediaCache } from "@/lib/media-cache";
+import { createDirectPayloadSource } from "@/lib/direct-payload-source";
 import { createMp4Transmuxer, type Mp4Transmuxer } from "@/lib/mp4-transmuxer";
 import { openRandomAccessAgeReader, type RandomAccessAgeReader } from "@/lib/random-access-age-reader";
 import { useCrypto } from "@/hooks/use-crypto";
@@ -352,6 +353,7 @@ export function MediaPreviewProvider({ children }: { children: React.ReactNode }
     targetRef.current = target;
     downloadedRef.current = 0;
     setPreview({ target, stage: "preparing", downloadedBytes: 0, expectedSize: target.expectedSize, bufferedRanges: [], mediaUrl: null, fallbackDownload: false });
+    let sequentialPayloadSource: ReturnType<typeof createDirectPayloadSource> | null = null;
     try {
       if (canTransmuxMp4) {
         if (encryptedPreviewDiskCacheEnabled) {
@@ -729,8 +731,9 @@ export function MediaPreviewProvider({ children }: { children: React.ReactNode }
       if (!current(session, controller.signal)) return;
       setPreview((state) => current(session, controller.signal) && state ? { ...state, stage: usingNative ? "buffering" : "downloading" } : state);
 
-      const response = await fetch(`/api/drive/payload/${encodeURIComponent(target.metaFileId)}`, { cache: "no-store", signal: controller.signal });
-      if (!response.ok || !response.body) throw new Error(`Failed to fetch payload (HTTP ${response.status})`);
+      sequentialPayloadSource = createDirectPayloadSource(target.metaFileId, { signal: controller.signal });
+      const response = await sequentialPayloadSource.fetch(undefined, controller.signal);
+      if (!response.body) throw new Error("The direct payload response has no readable body.");
       const decrypted = await decryptPayloadStream(identity, response.body);
       const reader = decrypted.content.getReader();
       if (usingNative) playbackModeRef.current = "native";
@@ -807,6 +810,8 @@ export function MediaPreviewProvider({ children }: { children: React.ReactNode }
       if (current(session, controller.signal)) setPreview((state) => state ? { ...state, stage: "complete", downloadedBytes: downloadedRef.current } : state);
     } catch (error) {
       if (!controller.signal.aborted) await fail(error);
+    } finally {
+      sequentialPayloadSource?.close();
     }
   }, [cancelTimers, clearMediaCache, current, disposeCurrent, encryptedPreviewDiskCacheEnabled, enqueueAppend, getPassphrase, schedule]);
 

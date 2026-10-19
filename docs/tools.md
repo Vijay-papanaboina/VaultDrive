@@ -1,6 +1,6 @@
 # Command Line Tools & Selection Export
 
-This document explains the browser file-selection/download workflow, integration with Rclone, and the suite of Node.js scripts in the [tools/](file:///mnt/D/Projects/encrypted-gdrive/tools) directory.
+This document explains the browser file-selection/download workflow, integration with Rclone, and the suite of Node.js scripts in the [tools/](../tools/) directory.
 
 ---
 
@@ -13,10 +13,10 @@ VaultDrive can also create new pairs in the browser. It preserves the CLI payloa
 To download files, VaultDrive provides a bulk-download helper pipeline:
 
 ### Workflow
-1. **Select Files**: Click the **Select Files** button in the [DriveHeader](file:///mnt/D/Projects/encrypted-gdrive/components/drive-header.tsx) to activate selection checkboxes.
+1. **Select Files**: Click the **Select Files** button in the [DriveHeader](../components/drive-header.tsx) to activate selection checkboxes.
 2. **Select Target Files**: Click on individual file cards or use global search to select files across multiple visited folders.
 3. **Choose a download mode** from the header:
-   - **Download Original Files** fetches each paired payload, stream-decrypts it in the browser, and saves the plaintext using the filename embedded in the payload. Chromium browsers with File System Access support write chunks directly to disk; other browsers use a Blob fallback. Files are downloaded individually.
+   - **Download Original Files** fetches each paired payload, stream-decrypts it in the browser, and saves the plaintext using the filename embedded in the payload. Chromium browsers with File System Access support write chunks directly to disk; other browsers use a Blob fallback. Individual and selected-file downloads share a FIFO queue capped at three active files.
    - **Download File List** downloads a local `files.txt` containing a line-separated list of relative folder paths and numeric payload filenames.
 4. **Fetch Using Rclone** (for the file-list mode): An interactive dialog displays the rclone commands to copy the encrypted files to your machine using the downloaded `files.txt`:
    ```bash
@@ -30,9 +30,9 @@ To download files, VaultDrive provides a bulk-download helper pipeline:
 
 ### Individual Card Downloads
 
-Every successfully decrypted card exposes a download icon on hover, and the same action is available in the card detail modal. The browser resolves the matching payload by using the `.meta` Drive file ID, the `.meta` file's parent folder, and the metadata filename without `.meta`. It then stream-decrypts the payload locally and saves the embedded original filename. The navbar's Downloads button shows each file's current stage and byte progress.
+Every successfully decrypted card exposes a download icon on hover, and the same action is available in the card detail modal. The browser resolves the matching payload by using the `.meta` Drive file ID, the `.meta` file's parent folder, and the metadata filename without `.meta`. Encrypted bytes come directly from Google Drive, not through an app proxy. Downloads support pause and resume; recoverable read interruptions can Continue from the committed offset, while write or integrity failures require discard and restart. The navbar's Downloads button shows each file's current stage and byte progress.
 
-Audio and video cards also expose **Preview**. Preview decrypts once while downloading, appends bounded chunks to MediaSource, and stores those chunks in an origin-private temporary cache for replay when the browser evicts a buffered range. Playback can only seek through data already decrypted; unsupported browser/codec combinations show the normal Download fallback. The cache is purged when the vault is locked, manually cleared, or after two hours of inactivity.
+Audio and video cards also expose **Preview**. MP4 previews fetch encrypted ranges directly from Google Drive and decrypt authenticated age records in the browser for MP4Box/MSE. Seeks can request ranges not yet fetched. Data stays in memory by default, with an optional encrypted disk cache. Native and fallback playback may use temporary plaintext browser storage; unsupported formats fall back to Download.
 
 ## Editing metadata
 
@@ -50,7 +50,7 @@ npm install
 ```
 
 ### A. VaultDrive CLI Packaging Tool
-* **File Path**: [tools/vaultdrive-cli.mjs](file:///mnt/D/Projects/encrypted-gdrive/tools/vaultdrive-cli.mjs)
+* **File Path**: [tools/vaultdrive-cli.mjs](../tools/vaultdrive-cli.mjs)
 * **Purpose**: Scans a local folder recursively for original files and webp/image thumbnails, packages them into encrypted `.meta` zip archives, and encrypts the files to numbered ID files ready for upload.
 
 #### Options
@@ -71,7 +71,7 @@ node tools/vaultdrive-cli.mjs --keys
 ---
 
 ### B. VaultDrive Decryption Utility
-* **File Path**: [tools/decrypt-file.mjs](file:///mnt/D/Projects/encrypted-gdrive/tools/decrypt-file.mjs)
+* **File Path**: [tools/decrypt-file.mjs](../tools/decrypt-file.mjs)
 * **Purpose**: Decrypts downloaded age-encrypted payloads and `.meta` packages locally using a passphrase, restoring the original filenames and directory hierarchy.
 
 Payload files produced by the packager decrypt to a four-byte big-endian filename length, a UTF-8 filename, and the original file bytes. The browser download path uses the same format and the same derived age identity, but consumes the payload as a stream and writes chunks to the selected destination instead of first creating a complete decrypted output file.
@@ -90,7 +90,7 @@ node tools/decrypt-file.mjs -d ./encrypted-files -o ./my-restored-files
 ---
 
 ### C. CLI Integration Test Suite
-* **File Path**: [tools/test-cli.mjs](file:///mnt/D/Projects/encrypted-gdrive/tools/test-cli.mjs)
+* **File Path**: [tools/test-cli.mjs](../tools/test-cli.mjs)
 * **Purpose**: Performs local end-to-end integration tests to verify the cryptographic packaging and decryption scripts. 
 
 #### What it tests

@@ -1,134 +1,65 @@
 import { auth } from "@/lib/auth";
+import { readBoundedRequestBody, RequestBodyTooLargeError } from "@/lib/bounded-request-body";
 import {
+  completeMetaUpload,
   completePayloadUpload,
-  createMetaUpload,
+  createMetaUploadSession,
   createPayloadUploadSession,
   deleteUploadPair,
   DriveApiError,
 } from "@/lib/google-drive";
-import { readBoundedRequestBody, RequestBodyTooLargeError } from "@/lib/bounded-request-body";
 import { headers } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 
+const MAX_CONTROL_BODY_BYTES = 8 * 1024;
 const MAX_META_BYTES = 25 * 1024 * 1024;
-const MAX_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
-const UPLOAD_SESSION_HEADER = "x-vault-upload-session";
+const NO_STORE_HEADERS = {
+  "Cache-Control": "private, no-store",
+  Pragma: "no-cache",
+  Vary: "Cookie",
+};
 
 export const runtime = "nodejs";
 
-type UploadRange =
-  | { kind: "status"; total: number }
-  | { kind: "chunk"; start: number; end: number; total: number };
-
-function safeInteger(value: string): number | null {
-  if (!/^\d+$/.test(value)) return null;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) ? parsed : null;
+function textResponse(message: string, status: number): NextResponse {
+  return new NextResponse(message, { status, headers: NO_STORE_HEADERS });
 }
 
-function parseUploadRange(value: string | null): UploadRange | null {
-  if (!value) return null;
-  const status = /^bytes \*\/(\d+)$/.exec(value);
-  if (status) {
-    const total = safeInteger(status[1]);
-    return total && total > 0 ? { kind: "status", total } : null;
+function jsonResponse(value: unknown, status = 200): NextResponse {
+  return NextResponse.json(value, { status, headers: NO_STORE_HEADERS });
+}
+
+function isCrossOrigin(request: NextRequest): boolean {
+  const origin = request.headers.get("origin");
+  if (origin !== null) {
+    try {
+      if (new URL(origin).origin !== new URL(request.url).origin) return true;
+    } catch {
+      return true;
+    }
   }
-  const chunk = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(value);
-  if (!chunk) return null;
-  const start = safeInteger(chunk[1]);
-  const end = safeInteger(chunk[2]);
-  const total = safeInteger(chunk[3]);
-  if (start === null || end === null || total === null || total <= 0 || start > end || end >= total) return null;
-  return { kind: "chunk", start, end, total };
+  return request.headers.get("sec-fetch-site")?.toLowerCase() === "cross-site";
 }
 
-function validatedSessionUrl(value: string | null): string | null {
-  if (!value) return null;
-  let url: URL;
+async function readJsonObject(request: NextRequest): Promise<Record<string, unknown>> {
+  const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") {
+    throw new DriveApiError("Upload control requests must use JSON", 415);
+  }
+  const bytes = await readBoundedRequestBody(request, MAX_CONTROL_BODY_BYTES);
+  let value: unknown;
   try {
-    url = new URL(value);
+    value = JSON.parse(new TextDecoder().decode(bytes));
   } catch {
-    return null;
+    throw new DriveApiError("Upload control request is invalid", 400);
   }
-  const pathIsValid = /^\/upload\/drive\/v3\/files(?:\/[A-Za-z0-9_-]+)?$/.test(url.pathname);
-  const uploadTypes = url.searchParams.getAll("uploadType");
-  const uploadIds = url.searchParams.getAll("upload_id");
-  if (
-    url.protocol !== "https:" ||
-    url.hostname !== "www.googleapis.com" ||
-    url.port ||
-    url.username ||
-    url.password ||
-    url.hash ||
-    !pathIsValid ||
-    uploadTypes.length !== 1 ||
-    uploadTypes[0] !== "resumable" ||
-    uploadIds.length !== 1 ||
-    !/^[A-Za-z0-9_-]+$/.test(uploadIds[0])
-  ) {
-    return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new DriveApiError("Upload control request is invalid", 400);
   }
-  return url.toString();
+  return value as Record<string, unknown>;
 }
 
-function validReceivedRange(value: string | null, total: number): string | null {
-  if (!value) return null;
-  const match = /^bytes=0-(\d+)$/.exec(value);
-  const end = match ? safeInteger(match[1]) : null;
-  return end !== null && end < total ? value : null;
-}
-
-function contentLengthFor(request: NextRequest, range: UploadRange): number | null {
-  const raw = request.headers.get("content-length");
-  if (range.kind === "status") return raw === null || raw === "0" ? 0 : null;
-  if (raw === null) return null;
-  const length = safeInteger(raw);
-  const expected = range.end - range.start + 1;
-  if (length === null || length !== expected || length > MAX_UPLOAD_CHUNK_BYTES) return null;
-  return length;
-}
-
-async function proxyResumableChunk(request: NextRequest, accessToken: string): Promise<NextResponse> {
-  const sessionUrl = validatedSessionUrl(request.headers.get(UPLOAD_SESSION_HEADER));
-  const range = parseUploadRange(request.headers.get("content-range"));
-  if (!sessionUrl || !range) return new NextResponse("Invalid upload chunk", { status: 400 });
-
-  const contentLength = contentLengthFor(request, range);
-  if (contentLength === null) return new NextResponse("Invalid upload chunk", { status: 400 });
-  if (range.kind === "chunk" && !request.body) return new NextResponse("Invalid upload chunk", { status: 400 });
-
-  const contentRange = range.kind === "status"
-    ? `bytes */${range.total}`
-    : `bytes ${range.start}-${range.end}/${range.total}`;
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${accessToken}`,
-    "Content-Range": contentRange,
-    "Content-Length": String(contentLength),
-  };
-  if (range.kind === "chunk") headers["Content-Type"] = "application/octet-stream";
-
-  const upstream = await fetch(sessionUrl, {
-    method: "PUT",
-    headers,
-    ...(range.kind === "chunk" ? { body: request.body!, duplex: "half" } : {}),
-    cache: "no-store",
-  } as RequestInit & { duplex?: "half" });
-  const replacementValue = upstream.headers.get("location");
-  const replacement = replacementValue === null ? null : validatedSessionUrl(replacementValue);
-  if (replacementValue !== null && !replacement) {
-    void upstream.body?.cancel().catch(() => undefined);
-    return new NextResponse("Drive upload session response was invalid", { status: 502 });
-  }
-
-  const responseHeaders = new Headers();
-  const receivedRange = validReceivedRange(upstream.headers.get("range"), range.total);
-  if (receivedRange) responseHeaders.set("Range", receivedRange);
-  if (replacement) responseHeaders.set("Location", replacement);
-  void upstream.body?.cancel().catch(() => undefined);
-  return new NextResponse(null, { status: upstream.status, headers: responseHeaders });
-}
-
-async function accessToken() {
+async function accessToken(): Promise<string | null> {
   const requestHeaders = await headers();
   const session = await auth.api.getSession({ headers: requestHeaders });
   if (!session) return null;
@@ -136,72 +67,91 @@ async function accessToken() {
   return token?.accessToken ?? null;
 }
 
-function errorResponse(error: unknown) {
-  if (error instanceof RequestBodyTooLargeError) return new NextResponse("Encrypted metadata is too large", { status: 413 });
-  if (error instanceof DriveApiError) return new NextResponse(error.message, { status: error.status });
-  console.error("[/api/drive/upload]", error);
-  return new NextResponse("Drive upload failed", { status: 500 });
+function errorResponse(error: unknown): NextResponse {
+  if (error instanceof RequestBodyTooLargeError) return textResponse("Upload control request is too large", 413);
+  if (error instanceof DriveApiError) {
+    const status = error.status >= 400 && error.status <= 599 ? error.status : 500;
+    const message = status === 400 ? "Invalid upload request"
+      : status === 401 ? "Unauthorized"
+        : status === 403 ? "Drive access denied"
+          : status === 404 ? "Upload target was not found"
+            : status === 409 ? "Upload state conflict"
+              : status === 413 ? "Upload request is too large"
+                : status === 415 ? "Upload control requests must use JSON"
+                  : "Drive upload failed";
+    return textResponse(message, status);
+  }
+  return textResponse("Drive upload failed", 500);
 }
 
 export async function POST(request: NextRequest, context: { params: Promise<{ action: string }> }) {
-  const token = await accessToken();
-  if (!token) return new NextResponse("Unauthorized", { status: 401 });
   const { action } = await context.params;
+  if (isCrossOrigin(request)) return textResponse("Cross-origin requests are not allowed", 403);
+  if (action === "chunk") return textResponse("Upload chunks are sent directly to Google Drive", 410);
 
   try {
-    if (action === "chunk") {
-      try {
-        return await proxyResumableChunk(request, token);
-      } catch {
-        return new NextResponse("Drive upload relay failed", { status: 502 });
-      }
-    }
-    if (action === "meta") {
-      const folderId = request.headers.get("x-vault-folder-id");
-      if (!folderId) return new NextResponse("folderId is required", { status: 400 });
-      const requestedOpaqueId = request.headers.get("x-vault-opaque-id")?.trim() || undefined;
-      const bytes = await readBoundedRequestBody(request, MAX_META_BYTES);
-      if (!bytes.byteLength) return new NextResponse("Encrypted metadata is empty", { status: 400 });
-      if (bytes.byteLength > MAX_META_BYTES) return new NextResponse("Encrypted metadata is too large", { status: 413 });
-      const result = await createMetaUpload(token, folderId, bytes, requestedOpaqueId);
-      return NextResponse.json(result);
-    }
+    const token = await accessToken();
+    if (!token) return textResponse("Unauthorized", 401);
 
-    const data = await request.json() as Record<string, unknown>;
+    const data = await readJsonObject(request);
+    if (action === "meta") {
+      if (
+        typeof data.folderId !== "string" ||
+        typeof data.encryptedMetaSize !== "number" ||
+        !Number.isSafeInteger(data.encryptedMetaSize) ||
+        data.encryptedMetaSize <= 0 ||
+        data.encryptedMetaSize > MAX_META_BYTES ||
+        (data.opaqueId !== undefined && typeof data.opaqueId !== "string")
+      ) {
+        return textResponse("folderId and encryptedMetaSize are required", 400);
+      }
+      return jsonResponse(await createMetaUploadSession(
+        token,
+        data.folderId,
+        data.encryptedMetaSize,
+        typeof data.opaqueId === "string" ? data.opaqueId : undefined
+      ));
+    }
+    if (action === "meta-complete") {
+      if (typeof data.metaFileId !== "string") return textResponse("metaFileId is required", 400);
+      return jsonResponse({ file: await completeMetaUpload(token, data.metaFileId) });
+    }
     if (action === "session") {
       const encryptedSize = data.encryptedSize;
       if (typeof data.metaFileId !== "string" || typeof encryptedSize !== "number" || !Number.isSafeInteger(encryptedSize) || encryptedSize <= 0) {
-        return new NextResponse("metaFileId and encryptedSize are required", { status: 400 });
+        return textResponse("metaFileId and encryptedSize are required", 400);
       }
-      return NextResponse.json(await createPayloadUploadSession(token, data.metaFileId, encryptedSize));
+      return jsonResponse(await createPayloadUploadSession(token, data.metaFileId, encryptedSize));
     }
     if (action === "complete") {
       if (typeof data.metaFileId !== "string" || typeof data.payloadFileId !== "string") {
-        return new NextResponse("metaFileId and payloadFileId are required", { status: 400 });
+        return textResponse("metaFileId and payloadFileId are required", 400);
       }
-      return NextResponse.json({ file: await completePayloadUpload(token, data.metaFileId, data.payloadFileId) });
+      return jsonResponse({ file: await completePayloadUpload(token, data.metaFileId, data.payloadFileId) });
     }
-    return new NextResponse("Unknown upload action", { status: 404 });
+    return textResponse("Unknown upload action", 404);
   } catch (error) {
     return errorResponse(error);
   }
 }
 
 export async function DELETE(request: NextRequest, context: { params: Promise<{ action: string }> }) {
-  const token = await accessToken();
-  if (!token) return new NextResponse("Unauthorized", { status: 401 });
   const { action } = await context.params;
-  if (action !== "cleanup") return new NextResponse("Unknown upload action", { status: 404 });
+  if (isCrossOrigin(request)) return textResponse("Cross-origin requests are not allowed", 403);
+  if (action !== "cleanup") return textResponse("Unknown upload action", 404);
+
   try {
-    const data = await request.json() as Record<string, unknown>;
+    const token = await accessToken();
+    if (!token) return textResponse("Unauthorized", 401);
+    const data = await readJsonObject(request);
     if (
       typeof data.metaFileId !== "string" ||
       (data.payloadFileId !== undefined && typeof data.payloadFileId !== "string")
     ) {
-      return new NextResponse("metaFileId is required and payloadFileId must be a string when provided", { status: 400 });
+      return textResponse("metaFileId is required and payloadFileId must be a string when provided", 400);
     }
     await deleteUploadPair(token, data.metaFileId, data.payloadFileId as string | undefined);
-    return new NextResponse(null, { status: 204 });
+    return new NextResponse(null, { status: 204, headers: NO_STORE_HEADERS });
   } catch (error) {
     return errorResponse(error);
   }

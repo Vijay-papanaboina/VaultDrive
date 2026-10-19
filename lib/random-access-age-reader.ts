@@ -5,6 +5,7 @@ import { chacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import type { EncryptedPreviewCache } from "@/lib/encrypted-preview-cache";
+import { createDirectPayloadSource, PayloadTransportError } from "@/lib/direct-payload-source";
 
 export const AGE_PLAINTEXT_RECORD_BYTES = 64 * 1024;
 export const AGE_CIPHERTEXT_RECORD_BYTES = AGE_PLAINTEXT_RECORD_BYTES + 16;
@@ -34,6 +35,7 @@ type OpenReaderOptions = {
   identity: string;
   metaFileId: string;
   signal?: AbortSignal;
+  requestSignal?: AbortSignal;
   fetchImpl?: typeof fetch;
   encryptedCache?: EncryptedPreviewCache | null;
 };
@@ -117,6 +119,7 @@ class AgePayloadReader implements RandomAccessAgeReader {
   private readonly recordCount: number;
   private readonly payloadKey: Uint8Array;
   private readonly fetchRange: (start: number, end: number, signal?: AbortSignal) => Promise<EncryptedRange>;
+  private readonly onClose?: () => void;
   private readonly cache = new Map<number, Uint8Array>();
   private readonly pins = new Map<number, number>();
   private closed = false;
@@ -132,6 +135,7 @@ class AgePayloadReader implements RandomAccessAgeReader {
     recordCount: number,
     payloadKey: Uint8Array,
     fetchRange: (start: number, end: number, signal?: AbortSignal) => Promise<EncryptedRange>,
+    onClose?: () => void,
   ) {
     this.filename = filename;
     this.originalSize = originalSize;
@@ -140,6 +144,7 @@ class AgePayloadReader implements RandomAccessAgeReader {
     this.recordCount = recordCount;
     this.payloadKey = payloadKey;
     this.fetchRange = fetchRange;
+    this.onClose = onClose;
   }
 
   private assertOpen(signal?: AbortSignal) {
@@ -315,30 +320,45 @@ class AgePayloadReader implements RandomAccessAgeReader {
     for (const bytes of this.cache.values()) bytes.fill(0);
     this.cache.clear();
     this.pins.clear();
+    this.onClose?.();
   }
 }
 
-export async function openRandomAccessAgeReader({ identity, metaFileId, signal, fetchImpl = fetch, encryptedCache = null }: OpenReaderOptions): Promise<RandomAccessAgeReader> {
-  if (signal?.aborted) throw abortError();
+export async function openRandomAccessAgeReader({ identity, metaFileId, signal, requestSignal, fetchImpl = fetch, encryptedCache = null }: OpenReaderOptions): Promise<RandomAccessAgeReader> {
+  if (signal?.aborted || requestSignal?.aborted) throw abortError();
+  const bootstrapSignal = requestSignal ?? signal;
+  const payloadSource = createDirectPayloadSource(metaFileId, { signal, fetchImpl });
   let encryptedPayloadSize: number | null = null;
   const fetchNetworkRange = async (start: number, end: number, requestSignal?: AbortSignal): Promise<EncryptedRange> => {
     let response: Response;
     try {
-      response = await fetchImpl(`/api/drive/payload/${encodeURIComponent(metaFileId)}`, {
-        cache: "no-store",
-        headers: { Range: `bytes=${start}-${end}` },
-        signal: requestSignal,
-      });
+      response = await payloadSource.fetch({ start, end }, requestSignal);
     } catch (error) {
-      if (requestSignal?.aborted) throw abortError();
+      if (requestSignal?.aborted || signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+        throw abortError();
+      }
+      if (error instanceof PayloadTransportError) throw error;
       throw new Error(`Could not read encrypted payload range: ${asError(error, "request failed").message}`);
     }
     if (response.status !== 206) throw new Error(`Payload range request failed (HTTP ${response.status}).`);
     const range = parseContentRange(response.headers.get("Content-Range"));
     const expectedEnd = Math.min(end, range.total - 1);
     if (range.start !== start || range.end !== expectedEnd) throw new Error("Payload range response does not match the requested bytes.");
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength !== range.end - range.start + 1) throw new Error("Payload range response ended early.");
+    let body: ArrayBuffer;
+    try {
+      body = await response.arrayBuffer();
+    } catch (error) {
+      if (requestSignal?.aborted || signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+        throw abortError();
+      }
+      throw new PayloadTransportError("The encrypted payload response was interrupted.");
+    }
+    if (requestSignal?.aborted || signal?.aborted) throw abortError();
+    const bytes = new Uint8Array(body);
+    if (bytes.byteLength !== range.end - range.start + 1) {
+      if (requestSignal?.aborted || signal?.aborted) throw abortError();
+      throw new PayloadTransportError("The encrypted payload response ended early.");
+    }
     return { bytes, ...range };
   };
 
@@ -384,30 +404,31 @@ export async function openRandomAccessAgeReader({ identity, metaFileId, signal, 
     return range;
   };
 
-  const headerProbe = await fetchRange(0, HEADER_PROBE_BYTES - 1, signal);
-  const headerEnd = findAgeHeaderEnd(headerProbe.bytes);
-  const payloadOffset = headerEnd + AGE_PAYLOAD_NONCE_BYTES;
-  if (payloadOffset >= headerProbe.total || headerEnd + AGE_PAYLOAD_NONCE_BYTES > headerProbe.bytes.byteLength) {
-    throw new Error("Encrypted payload is missing its age stream nonce.");
-  }
-  const nonce = headerProbe.bytes.subarray(headerEnd, payloadOffset);
-  const { plaintextSize, recordCount } = plaintextSizeFromEncryptedPayload(headerProbe.total - payloadOffset);
-
-  const decrypter = new Decrypter();
-  decrypter.addIdentity(identity);
   let fileKey: Uint8Array | null = null;
   let reader: AgePayloadReader | null = null;
+  let nonce: Uint8Array | null = null;
   let opened = false;
   try {
+    const headerProbe = await fetchRange(0, HEADER_PROBE_BYTES - 1, bootstrapSignal);
+    const headerEnd = findAgeHeaderEnd(headerProbe.bytes);
+    const payloadOffset = headerEnd + AGE_PAYLOAD_NONCE_BYTES;
+    if (payloadOffset >= headerProbe.total || headerEnd + AGE_PAYLOAD_NONCE_BYTES > headerProbe.bytes.byteLength) {
+      throw new Error("Encrypted payload is missing its age stream nonce.");
+    }
+    nonce = headerProbe.bytes.subarray(headerEnd, payloadOffset);
+    const { plaintextSize, recordCount } = plaintextSizeFromEncryptedPayload(headerProbe.total - payloadOffset);
+
+    const decrypter = new Decrypter();
+    decrypter.addIdentity(identity);
     fileKey = await decrypter.decryptHeader(headerProbe.bytes.subarray(0, headerEnd));
     const payloadKey = hkdf(sha256, fileKey, nonce, PAYLOAD_INFO, 32);
-    reader = new AgePayloadReader("", 0, payloadOffset, plaintextSize, recordCount, payloadKey, fetchRange);
-    const filenameHeader = await reader.readPayloadPrefix(4, signal);
+    reader = new AgePayloadReader("", 0, payloadOffset, plaintextSize, recordCount, payloadKey, fetchRange, () => payloadSource.close());
+    const filenameHeader = await reader.readPayloadPrefix(4, bootstrapSignal);
     const filenameLength = new DataView(filenameHeader.buffer, filenameHeader.byteOffset, filenameHeader.byteLength).getUint32(0, false);
     if (filenameLength === 0 || filenameLength > MAX_FILENAME_BYTES) throw new Error("Decrypted payload has an invalid filename header.");
     const prefixLength = 4 + filenameLength;
     if (prefixLength > plaintextSize) throw new Error("Decrypted payload ended inside its filename header.");
-    const prefix = await reader.readPayloadPrefix(prefixLength, signal);
+    const prefix = await reader.readPayloadPrefix(prefixLength, bootstrapSignal);
     let filename: string;
     try {
       filename = new TextDecoder("utf-8", { fatal: true }).decode(prefix.subarray(4));
@@ -421,7 +442,10 @@ export async function openRandomAccessAgeReader({ identity, metaFileId, signal, 
     return reader;
   } finally {
     fileKey?.fill(0);
-    nonce.fill(0);
-    if (!opened) reader?.close();
+    nonce?.fill(0);
+    if (!opened) {
+      reader?.close();
+      payloadSource.close();
+    }
   }
 }

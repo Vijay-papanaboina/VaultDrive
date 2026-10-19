@@ -3,6 +3,8 @@ import { database } from "@/lib/database";
 
 export const auth = betterAuth({
   database,
+  // Keep write-capable and refresh credentials available only to server callers.
+  disabledPaths: ["/get-access-token", "/refresh-token"],
   baseURL: process.env.BETTER_AUTH_URL!,
   secret: process.env.BETTER_AUTH_SECRET!,
   socialProviders: {

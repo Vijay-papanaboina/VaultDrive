@@ -2,11 +2,11 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Shield, Lock, CheckSquare, Download, Clipboard, Check, Trash2, Search, KeyRound, Files, List, Loader2, AlertCircle, Upload, RotateCcw, Pause } from "lucide-react";
+import { Shield, Lock, CheckSquare, Download, Clipboard, Check, Trash2, Search, KeyRound, Files, List, Loader2, AlertCircle, Upload, RotateCcw, Pause, Play, Clock3 } from "lucide-react";
 import { UserMenu } from "@/components/user-menu";
 import { useSelection } from "@/components/selection-provider";
 import { useCrypto } from "@/hooks/use-crypto";
-import { useFileDownload } from "@/components/file-download-provider";
+import { useFileDownload, type DownloadStage } from "@/components/file-download-provider";
 import { GlobalSearchModal } from "@/components/global-search-modal";
 import { useFileUpload } from "@/components/file-upload-provider";
 import {
@@ -42,6 +42,11 @@ export function DriveHeader() {
     batch,
     downloadItems,
     downloadSelected,
+    pauseDownload,
+    resumeDownload,
+    continueDownload,
+    discardDownload,
+    restartDownload,
     clearDownloadHistory,
   } = useFileDownload();
   const { uploadItems, resumeUpload, cancelUpload, clearUploadHistory } = useFileUpload();
@@ -55,7 +60,9 @@ export function DriveHeader() {
   } | null>(null);
   const [isBatchResultOpen, setIsBatchResultOpen] = useState(false);
   const [isDownloadsOpen, setIsDownloadsOpen] = useState(false);
+  const [downloadActionError, setDownloadActionError] = useState<string | null>(null);
   const [isUploadsOpen, setIsUploadsOpen] = useState(false);
+  const [uploadHistoryError, setUploadHistoryError] = useState<string | null>(null);
   const [resumeTarget, setResumeTarget] = useState<string | null>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [rcloneRemote, setRcloneRemote] = useState("mygdrive:");
@@ -73,6 +80,24 @@ export function DriveHeader() {
     setResumeTarget(null);
     if (!file || !id) return;
     await resumeUpload(id, file).catch(() => undefined);
+  };
+
+  const handleClearUploadHistory = async () => {
+    setUploadHistoryError(null);
+    try {
+      await clearUploadHistory();
+    } catch {
+      setUploadHistoryError("Upload history could not be cleared.");
+    }
+  };
+
+  const handleClearDownloadHistory = async () => {
+    setDownloadActionError(null);
+    try {
+      await clearDownloadHistory();
+    } catch {
+      setDownloadActionError("Download history could not be cleared. Try again.");
+    }
   };
 
   const handleExport = () => {
@@ -298,7 +323,7 @@ export function DriveHeader() {
               <span className="flex flex-col gap-1">
                 <span className="text-sm font-medium">Download original files</span>
                 <span className="text-xs leading-relaxed text-muted-foreground">
-                  Fetch, decrypt, and save {selectedFiles.length} file{selectedFiles.length === 1 ? "" : "s"} one at a time.
+                  Fetch, decrypt, and save up to three files at a time.
                 </span>
               </span>
             </button>
@@ -325,15 +350,17 @@ export function DriveHeader() {
                 : item.stage === "complete"
                   ? 100
                   : 0;
-              const stageLabel = item.stage === "resolving"
-                ? "Preparing"
-                : item.stage === "downloading"
-                  ? "Downloading encrypted payload"
-                  : item.stage === "streaming"
-                    ? "Decrypting and writing stream"
-                    : item.stage === "complete"
-                      ? "Complete"
-                      : "Failed";
+              const stageLabels: Record<DownloadStage, string> = {
+                queued: "Queued",
+                paused: "Paused",
+                resolving: "Preparing",
+                downloading: "Downloading encrypted payload",
+                streaming: "Decrypting and writing stream",
+                finalizing: "Finalizing file",
+                complete: "Complete",
+                failed: "Failed",
+              };
+              const stageLabel = stageLabels[item.stage];
 
               return (
                 <div
@@ -346,14 +373,77 @@ export function DriveHeader() {
                         <Check className="h-4 w-4 text-emerald-400" />
                       ) : item.stage === "failed" ? (
                         <AlertCircle className="h-4 w-4 text-amber-400" />
+                      ) : item.stage === "paused" ? (
+                        <Pause className="h-4 w-4 text-muted-foreground" />
+                      ) : item.stage === "queued" ? (
+                        <Clock3 className="h-4 w-4 text-muted-foreground" />
                       ) : (
                         <Loader2 className="h-4 w-4 animate-spin text-violet-400" />
                       )}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium" title={item.filename}>
-                        {item.filename}
-                      </p>
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="truncate text-sm font-medium" title={item.filename}>
+                          {item.filename}
+                        </p>
+                        <div className="flex shrink-0 items-center gap-1">
+                          {item.stage === "paused" && (
+                            <button
+                              type="button"
+                              onClick={() => resumeDownload(item.metaFileId)}
+                              aria-label={`Resume download ${item.filename}`}
+                              title={`Resume ${item.filename}`}
+                              className="rounded-md p-1 text-emerald-300 transition-colors hover:bg-emerald-400/10 hover:text-emerald-200"
+                            >
+                              <Play className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          {["queued", "resolving", "downloading", "streaming"].includes(item.stage) && (
+                            <button
+                              type="button"
+                              onClick={() => pauseDownload(item.metaFileId)}
+                              aria-label={`Pause download ${item.filename}`}
+                              title={`Pause ${item.filename}`}
+                              className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+                            >
+                              <Pause className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          {item.stage === "failed" && item.canContinue && (
+                            <button
+                              type="button"
+                              onClick={() => { void continueDownload(item.metaFileId).catch((error: unknown) => setDownloadActionError(error instanceof Error ? error.message : "Download could not continue.")); }}
+                              aria-label={`Continue download ${item.filename}`}
+                              title={`Continue ${item.filename}`}
+                              className="rounded-md p-1 text-emerald-300 transition-colors hover:bg-emerald-400/10 hover:text-emerald-200"
+                            >
+                              <RotateCcw className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          {item.stage === "failed" && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => { void restartDownload({ metaFileId: item.metaFileId, fallbackName: item.filename, expectedSize: item.expectedSize }).catch((error: unknown) => setDownloadActionError(error instanceof Error ? error.message : "Download could not restart.")); }}
+                                aria-label={`Discard and restart download ${item.filename}`}
+                                title={`Discard and restart ${item.filename}`}
+                                className="rounded-md p-1 text-amber-200 transition-colors hover:bg-amber-400/10 hover:text-amber-100"
+                              >
+                                <Download className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => { void discardDownload(item.metaFileId).catch((error: unknown) => setDownloadActionError(error instanceof Error ? error.message : "Download could not be discarded.")); }}
+                                aria-label={`Discard download ${item.filename}`}
+                                title={`Discard ${item.filename}`}
+                                className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
                       <div className="mt-1 flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
                         <span>{stageLabel}</span>
                         {item.expectedSize ? (
@@ -385,13 +475,13 @@ export function DriveHeader() {
           <div className="mt-2 flex justify-end">
             <button
               type="button"
-              onClick={clearDownloadHistory}
-              disabled={batch?.active}
+              onClick={() => void handleClearDownloadHistory()}
               className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
             >
               Clear history
             </button>
           </div>
+          {downloadActionError && <p role="alert" className="mt-2 text-xs text-amber-200">{downloadActionError}</p>}
         </DialogContent>
       </Dialog>
 
@@ -399,18 +489,19 @@ export function DriveHeader() {
         <DialogContent className="max-w-lg border-white/10 bg-[#0f0f13]/95 text-foreground backdrop-blur-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-lg font-semibold"><Upload className="h-5 w-5 text-emerald-400" />Uploads</DialogTitle>
-            <DialogDescription className="text-xs text-muted-foreground">Encrypted metadata uploads first. Original data encrypts and reaches Drive in bounded chunks.</DialogDescription>
+            <DialogDescription className="text-xs text-muted-foreground">Upload sessions are memory-only. Reload, reopen, or lock the vault ends the ability to resume. Clearing history does not delete Drive files.</DialogDescription>
           </DialogHeader>
           <input type="file" className="hidden" id="resume-upload-source" onChange={handleResumeFile} />
           <div className="mt-2 max-h-[55vh] space-y-2 overflow-y-auto pr-1 custom-scrollbar">
             {uploadList.map((item) => {
               const active = ["preparing", "meta", "encrypting", "uploading", "retrying", "finalizing"].includes(item.stage);
               const progress = item.encryptedSize ? Math.min(100, item.bytesUploaded / item.encryptedSize * 100) : 0;
-              const label = item.stage === "preparing" ? "Preparing encryption" : item.stage === "meta" ? "Uploading encrypted metadata" : item.stage === "encrypting" ? "Encrypting stream" : item.stage === "uploading" ? "Uploading encrypted stream" : item.stage === "retrying" ? "Checking Drive resume point" : item.stage === "finalizing" ? "Finalizing encrypted upload" : item.stage === "paused" ? "Paused — choose source to resume" : item.stage === "complete" ? "Complete" : "Failed — choose source to resume";
+              const label = item.stage === "preparing" ? "Preparing encryption" : item.stage === "meta" ? "Uploading encrypted metadata" : item.stage === "encrypting" ? "Encrypting stream" : item.stage === "uploading" ? "Uploading encrypted stream" : item.stage === "retrying" ? "Checking Drive resume point" : item.stage === "finalizing" ? "Finalizing encrypted upload" : item.stage === "paused" ? "Paused - choose source to resume" : item.stage === "complete" ? "Complete" : "Failed - choose source to resume";
               return <div key={item.id} className="rounded-xl border border-white/8 bg-white/3 p-3"><div className="flex items-start gap-3"><div className="mt-0.5">{item.stage === "complete" ? <Check className="h-4 w-4 text-emerald-400" /> : item.stage === "failed" ? <AlertCircle className="h-4 w-4 text-amber-400" /> : active ? <Loader2 className="h-4 w-4 animate-spin text-violet-400" /> : <Pause className="h-4 w-4 text-muted-foreground" />}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><p className="truncate text-sm font-medium">{item.filename}</p>{item.resumable && !active && <button type="button" onClick={() => { setResumeTarget(item.id); document.getElementById("resume-upload-source")?.click(); }} className="text-[11px] text-emerald-300 hover:text-emerald-200"><RotateCcw className="mr-1 inline h-3 w-3" />Resume</button>}</div><div className="mt-1 flex justify-between gap-3 text-[11px] text-muted-foreground"><span>{label}</span><span>{formatDownloadBytes(item.bytesUploaded)} / {formatDownloadBytes(item.encryptedSize)}</span></div><div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10"><div className={`h-full rounded-full transition-[width] duration-300 ${item.stage === "failed" ? "bg-amber-400" : "bg-emerald-400"}`} style={{ width: `${progress}%` }} /></div>{item.error && <p className="mt-1.5 text-[11px] text-amber-200/80">{item.error}</p>} {item.resumable && !active && <button type="button" onClick={() => void cancelUpload(item.id)} className="mt-2 text-[11px] text-muted-foreground hover:text-red-300">Cancel and remove encrypted pair</button>}</div></div></div>;
             })}
           </div>
-          <div className="mt-2 flex justify-end"><button type="button" onClick={clearUploadHistory} className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-muted-foreground hover:bg-white/10 hover:text-foreground">Clear completed</button></div>
+          {uploadHistoryError && <p role="alert" className="mt-2 text-xs text-amber-200">{uploadHistoryError}</p>}
+          <div className="mt-2 flex justify-end"><button type="button" onClick={() => void handleClearUploadHistory()} className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-muted-foreground hover:bg-white/10 hover:text-foreground">Clear completed and failed</button></div>
         </DialogContent>
       </Dialog>
 

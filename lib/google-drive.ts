@@ -31,6 +31,8 @@ const VAULTDRIVE_META_ID_PROPERTY = "vaultdriveMetaFileId";
 const VAULTDRIVE_PAYLOAD_ID_PROPERTY = "vaultdrivePayloadFileId";
 const VAULTDRIVE_UPLOAD_CLAIM_PROPERTY = "vaultdriveUploadClaim";
 const VAULTDRIVE_EXPECTED_PAYLOAD_SIZE_PROPERTY = "vaultdriveExpectedPayloadSize";
+const VAULTDRIVE_EXPECTED_META_SIZE_PROPERTY = "vaultdriveExpectedMetaSize";
+const VAULTDRIVE_UPLOADING_META = "uploading-meta";
 const VAULTDRIVE_AWAITING_PAYLOAD = "awaiting-payload";
 const VAULTDRIVE_CREATING_PAYLOAD = "creating-payload";
 const VAULTDRIVE_PENDING = "pending";
@@ -42,7 +44,8 @@ async function driveGet(
   accessToken: string,
   path: string,
   params: Record<string, string> = {},
-  requestHeaders: Record<string, string> = {}
+  requestHeaders: Record<string, string> = {},
+  signal?: AbortSignal
 ): Promise<Response> {
   const url = new URL(`${DRIVE_API}${path}`);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
@@ -50,6 +53,7 @@ async function driveGet(
     headers: { ...authHeaders(accessToken), ...requestHeaders },
     // Next.js: don't cache Drive responses by default
     cache: "no-store",
+    signal,
   });
   if (!res.ok) {
     const body = await res.text();
@@ -63,7 +67,8 @@ async function driveGet(
 async function listAll(
   accessToken: string,
   q: string,
-  fields: string
+  fields: string,
+  signal?: AbortSignal
 ): Promise<DriveListResponse["files"]> {
   const all: DriveListResponse["files"] = [];
   let pageToken: string | undefined;
@@ -77,7 +82,7 @@ async function listAll(
     };
     if (pageToken) params.pageToken = pageToken;
 
-    const res = await driveGet(accessToken, "/files", params);
+    const res = await driveGet(accessToken, "/files", params, {}, signal);
     const data: DriveListResponse = await res.json();
     all.push(...data.files);
     pageToken = data.nextPageToken;
@@ -109,8 +114,15 @@ export async function listMetaFiles(
   folderId: string
 ): Promise<DriveMetaFile[]> {
   const q = `'${escapeDriveQueryValue(folderId)}' in parents and fileExtension = 'meta' and trashed = false`;
-  const files = await listAll(accessToken, q, "id,name,size,modifiedTime,createdTime");
-  return files as DriveMetaFile[];
+  const files = await listAll(accessToken, q, "id,name,size,modifiedTime,createdTime,appProperties") as Array<DriveMetaFile & {
+    appProperties?: Record<string, string>;
+  }>;
+  return files
+    .filter((file) => file.appProperties?.[VAULTDRIVE_UPLOAD_STATE_PROPERTY] !== VAULTDRIVE_UPLOADING_META)
+    .map((file) => {
+      delete file.appProperties;
+      return file;
+    });
 }
 
 function parseMetaByteLength(
@@ -304,18 +316,44 @@ async function deleteDriveFile(accessToken: string, fileId: string): Promise<voi
   }
 }
 
-export interface CreatedUploadMeta {
-  metaFile: DriveMetaFile;
+export interface CreatedUploadMetaSession {
+  metaFile: { id: string };
   opaqueId: string;
+  sessionUrl: string;
 }
 
-/** Create the encrypted .meta sidecar first, under an opaque numeric name. */
-export async function createMetaUpload(
+function isValidMetaUploadSessionUrl(value: string, fileId: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  const uploadTypes = url.searchParams.getAll("uploadType");
+  const uploadIds = url.searchParams.getAll("upload_id");
+  return url.protocol === "https:" &&
+    url.hostname === "www.googleapis.com" &&
+    url.port === "" &&
+    url.username === "" &&
+    url.password === "" &&
+    url.hash === "" &&
+    url.pathname === `/upload/drive/v3/files/${encodeURIComponent(fileId)}` &&
+    uploadTypes.length === 1 &&
+    uploadTypes[0] === "resumable" &&
+    uploadIds.length === 1 &&
+    /^[A-Za-z0-9_-]+$/.test(uploadIds[0]);
+}
+
+/** Allocate an opaque .meta sidecar and its direct resumable upload session. */
+export async function createMetaUploadSession(
   accessToken: string,
   folderId: string,
-  encryptedMeta: Uint8Array,
+  encryptedMetaSize: number,
   requestedOpaqueId?: string
-): Promise<CreatedUploadMeta> {
+): Promise<CreatedUploadMetaSession> {
+  if (!Number.isSafeInteger(encryptedMetaSize) || encryptedMetaSize <= 0 || encryptedMetaSize > MAX_META_BYTES) {
+    throw new DriveApiError("Encrypted metadata size is invalid", encryptedMetaSize > MAX_META_BYTES ? 413 : 400);
+  }
   if (requestedOpaqueId && !VAULTDRIVE_OPAQUE_ID.test(requestedOpaqueId)) {
     throw new DriveApiError("File ID must contain only 1 to 32 digits", 400);
   }
@@ -332,31 +370,42 @@ export async function createMetaUpload(
       continue;
     }
 
-    const boundary = `vaultdrive-${crypto.randomUUID()}`;
-    const body = new Blob([
-      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`,
-      JSON.stringify({
-        name: metaName,
-        parents: [folderId],
-        mimeType: "application/octet-stream",
-        appProperties: { [VAULTDRIVE_UPLOAD_STATE_PROPERTY]: VAULTDRIVE_AWAITING_PAYLOAD },
-      }),
-      `\r\n--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`,
-      encryptedMeta.buffer.slice(encryptedMeta.byteOffset, encryptedMeta.byteOffset + encryptedMeta.byteLength) as ArrayBuffer,
-      `\r\n--${boundary}--`,
-    ]);
-    const response = await fetch(driveUploadUrl("/files", {
-      uploadType: "multipart", fields: "id,name,size,modifiedTime,createdTime",
-    }), {
-      method: "POST",
-      headers: { ...authHeaders(accessToken), "Content-Type": `multipart/related; boundary=${boundary}` },
-      body,
-      cache: "no-store",
+    const metaFile = await createDriveFile(accessToken, {
+      name: metaName,
+      parents: [folderId],
+      mimeType: "application/octet-stream",
+      appProperties: {
+        [VAULTDRIVE_UPLOAD_STATE_PROPERTY]: VAULTDRIVE_UPLOADING_META,
+        [VAULTDRIVE_EXPECTED_META_SIZE_PROPERTY]: String(encryptedMetaSize),
+      },
     });
-    if (!response.ok) {
-      throw new DriveApiError(`Drive metadata upload failed (${response.status}): ${await response.text()}`, response.status);
+    try {
+      const response = await fetch(driveUploadUrl(`/files/${encodeURIComponent(metaFile.id)}`, { uploadType: "resumable" }), {
+        method: "PATCH",
+        headers: {
+          ...authHeaders(accessToken),
+          "X-Upload-Content-Type": "application/octet-stream",
+          "X-Upload-Content-Length": String(encryptedMetaSize),
+          "Content-Length": "0",
+        },
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new DriveApiError(`Drive resumable upload setup failed (${response.status})`, response.status);
+      }
+      const sessionUrl = response.headers.get("location");
+      if (!sessionUrl || !isValidMetaUploadSessionUrl(sessionUrl, metaFile.id)) {
+        throw new DriveApiError("Drive returned an invalid resumable upload URL", 502);
+      }
+      return { metaFile: { id: metaFile.id }, opaqueId, sessionUrl };
+    } catch (error) {
+      try {
+        await deleteDriveFile(accessToken, metaFile.id);
+      } catch {
+        // Keep the original setup error. Cleanup only targets this new file.
+      }
+      throw error;
     }
-    return { metaFile: await response.json() as DriveMetaFile, opaqueId };
   }
   throw new DriveApiError("Could not allocate a unique opaque file ID", 409);
 }
@@ -371,6 +420,7 @@ type UploadMeta = {
   id?: string;
   name: string;
   parents?: string[];
+  size?: string;
   appProperties?: Record<string, string>;
 };
 
@@ -379,13 +429,38 @@ async function getUploadMeta(
   metaFileId: string
 ): Promise<{ meta: UploadMeta }> {
   const response = await fetch(
-    `${DRIVE_API}/files/${encodeURIComponent(metaFileId)}?fields=id,name,parents,appProperties`,
+    `${DRIVE_API}/files/${encodeURIComponent(metaFileId)}?fields=id,name,parents,size,appProperties`,
     { headers: authHeaders(accessToken), cache: "no-store" }
   );
   if (!response.ok) {
     throw new DriveApiError(`Drive upload state lookup failed (${response.status}): ${await response.text()}`, response.status);
   }
   return { meta: await response.json() as UploadMeta };
+}
+
+export async function completeMetaUpload(accessToken: string, metaFileId: string): Promise<{ id: string }> {
+  const { meta } = await getUploadMeta(accessToken, metaFileId);
+  const expectedSizeValue = meta.appProperties?.[VAULTDRIVE_EXPECTED_META_SIZE_PROPERTY];
+  const expectedSize = expectedSizeValue && /^\d+$/.test(expectedSizeValue) ? Number(expectedSizeValue) : NaN;
+  const actualSize = meta.size && /^\d+$/.test(meta.size) ? Number(meta.size) : NaN;
+  if (
+    !VAULTDRIVE_META_NAME.test(meta.name) ||
+    !Number.isSafeInteger(expectedSize) || expectedSize <= 0 || expectedSize > MAX_META_BYTES ||
+    !Number.isSafeInteger(actualSize) || actualSize !== expectedSize
+  ) {
+    throw new DriveApiError("Encrypted metadata upload is incomplete or invalid", 409);
+  }
+  const state = meta.appProperties?.[VAULTDRIVE_UPLOAD_STATE_PROPERTY];
+  if (state !== VAULTDRIVE_UPLOADING_META && state !== VAULTDRIVE_AWAITING_PAYLOAD) {
+    throw new DriveApiError("Encrypted metadata is not awaiting completion", 409);
+  }
+  if (state === VAULTDRIVE_UPLOADING_META) {
+    await updateDriveFileAppProperties(accessToken, metaFileId, {
+      ...meta.appProperties,
+      [VAULTDRIVE_UPLOAD_STATE_PROPERTY]: VAULTDRIVE_AWAITING_PAYLOAD,
+    });
+  }
+  return { id: metaFileId };
 }
 
 async function deleteClaimedMeta(
@@ -450,6 +525,16 @@ async function createPayloadUploadSessionLocked(
     meta.appProperties?.[VAULTDRIVE_UPLOAD_STATE_PROPERTY] !== VAULTDRIVE_AWAITING_PAYLOAD
   ) {
     throw new DriveApiError("The metadata file is not ready to create an upload session", 409);
+  }
+  const expectedMetaSize = meta.appProperties[VAULTDRIVE_EXPECTED_META_SIZE_PROPERTY];
+  if (expectedMetaSize !== undefined && (
+    !/^\d+$/.test(expectedMetaSize) ||
+    !Number.isSafeInteger(Number(expectedMetaSize)) ||
+    Number(expectedMetaSize) <= 0 ||
+    Number(expectedMetaSize) > MAX_META_BYTES ||
+    meta.size !== expectedMetaSize
+  )) {
+    throw new DriveApiError("Encrypted metadata upload is incomplete", 409);
   }
 
   // Drive v3 does not reliably expose an ETag header for files.get. The
@@ -633,14 +718,28 @@ export async function deleteUploadPair(
   };
 
   const meta = await fetchUploadFile(metaFileId);
-  if (!payloadFileId) {
-    // A session can fail before a payload ID exists. This narrow recovery is
-    // limited to the server-created pre-pair state; a pending or completed
-    // sidecar still requires its exact, bidirectionally-bound peer.
+  let resolvedPayloadFileId = payloadFileId;
+  if (!resolvedPayloadFileId && meta) {
+    const boundPayloadId = meta.appProperties?.[VAULTDRIVE_PAYLOAD_ID_PROPERTY];
+    if (
+      VAULTDRIVE_META_NAME.test(meta.name ?? "") &&
+      meta.appProperties?.[VAULTDRIVE_UPLOAD_STATE_PROPERTY] === VAULTDRIVE_PENDING &&
+      typeof boundPayloadId === "string" &&
+      /^[A-Za-z0-9_-]{1,256}$/.test(boundPayloadId)
+    ) {
+      // If the browser missed the session response, recover only the exact
+      // pending peer named by the numeric sidecar, then run normal pair checks.
+      resolvedPayloadFileId = boundPayloadId;
+    }
+  }
+  if (!resolvedPayloadFileId) {
+    // A session can fail before a payload ID exists. Only server-created
+    // pre-pair states without a bound peer can be removed directly.
     if (!meta) return;
     if (
       VAULTDRIVE_META_NAME.test(meta.name ?? "") &&
-      (meta.appProperties?.[VAULTDRIVE_UPLOAD_STATE_PROPERTY] === VAULTDRIVE_AWAITING_PAYLOAD ||
+      (meta.appProperties?.[VAULTDRIVE_UPLOAD_STATE_PROPERTY] === VAULTDRIVE_UPLOADING_META ||
+        meta.appProperties?.[VAULTDRIVE_UPLOAD_STATE_PROPERTY] === VAULTDRIVE_AWAITING_PAYLOAD ||
         meta.appProperties?.[VAULTDRIVE_UPLOAD_STATE_PROPERTY] === VAULTDRIVE_CREATING_PAYLOAD) &&
       !meta.appProperties?.[VAULTDRIVE_PAYLOAD_ID_PROPERTY]
     ) {
@@ -649,11 +748,11 @@ export async function deleteUploadPair(
     }
     throw new DriveApiError("Upload metadata is not awaiting a payload", 409);
   }
-  const payload = await fetchUploadFile(payloadFileId);
+  const payload = await fetchUploadFile(resolvedPayloadFileId);
   const isPendingMeta = (file: UploadFile) =>
     VAULTDRIVE_META_NAME.test(file.name ?? "") &&
     file.appProperties?.[VAULTDRIVE_UPLOAD_STATE_PROPERTY] === VAULTDRIVE_PENDING &&
-    file.appProperties?.[VAULTDRIVE_PAYLOAD_ID_PROPERTY] === payloadFileId;
+    file.appProperties?.[VAULTDRIVE_PAYLOAD_ID_PROPERTY] === resolvedPayloadFileId;
   const isPendingPayload = (file: UploadFile) => {
     if (
       file.appProperties?.[VAULTDRIVE_UPLOAD_STATE_PROPERTY] !== VAULTDRIVE_PENDING ||
@@ -683,7 +782,7 @@ export async function deleteUploadPair(
       return;
     }
     if (payload && isPendingPayload(payload)) {
-      await deleteDriveFile(accessToken, payloadFileId);
+      await deleteDriveFile(accessToken, resolvedPayloadFileId);
       return;
     }
     throw new DriveApiError("Upload cleanup pair is incomplete", 409);
@@ -698,19 +797,22 @@ export async function deleteUploadPair(
     throw new DriveApiError("Upload cleanup pair is invalid", 400);
   }
 
-  await Promise.all([metaFileId, payloadFileId].map(async (id) => {
+  await Promise.all([metaFileId, resolvedPayloadFileId].map(async (id) => {
     await deleteDriveFile(accessToken, id);
   }));
 }
 
 async function resolvePayloadFile(
   accessToken: string,
-  metaFileId: string
-): Promise<{ id: string; name: string }> {
+  metaFileId: string,
+  signal?: AbortSignal
+): Promise<{ id: string; name: string; size?: string; resourceKey?: string }> {
   const metaRes = await driveGet(
     accessToken,
     `/files/${encodeURIComponent(metaFileId)}`,
-    { fields: "id,name,parents,appProperties" }
+    { fields: "id,name,parents,appProperties" },
+    {},
+    signal
   );
   const metaFile: { id: string; name: string; parents?: string[]; appProperties?: Record<string, string> } =
     await metaRes.json();
@@ -726,10 +828,11 @@ async function resolvePayloadFile(
 
   const payloadName = metaFile.name.replace(/\.meta$/i, "");
   const q = `'${escapeDriveQueryValue(parentId)}' in parents and name = '${escapeDriveQueryValue(payloadName)}' and trashed = false`;
-  const payloads = await listAll(accessToken, q, "id,name,size,appProperties") as Array<{
+  const payloads = await listAll(accessToken, q, "id,name,size,resourceKey,appProperties", signal) as Array<{
     id: string;
     name: string;
     size?: string;
+    resourceKey?: string;
     appProperties?: Record<string, string>;
   }>;
 
@@ -756,22 +859,219 @@ async function resolvePayloadFile(
 }
 
 /**
- * Return the upstream encrypted payload response without buffering it.
+ * Create a direct download session for the securely paired encrypted payload.
  * Payloads live beside their metadata file and use the metadata filename
  * without the final `.meta` suffix (for example, `42.meta` -> `42`).
  */
-export async function getPayloadStream(
+export interface PayloadDownloadSession {
+  downloadUri: string;
+  partialDownloadAllowed: boolean;
+  payloadFileId: string;
+  encryptedSize: number;
+  resourceKey?: string;
+}
+
+interface DriveDownloadOperation {
+  name?: unknown;
+  done?: unknown;
+  metadata?: { resourceKey?: unknown } | null;
+  response?: { downloadUri?: unknown; partialDownloadAllowed?: unknown } | null;
+  error?: unknown;
+}
+
+const MAX_DOWNLOAD_SESSION_MS = 45_000;
+const MAX_RESOURCE_KEY_LENGTH = 2048;
+
+function validResourceKey(value: unknown): value is string {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_RESOURCE_KEY_LENGTH &&
+    !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function downloadOperationId(name: unknown): string {
+  if (typeof name !== "string" || name.length === 0 || name.length > 1024) {
+    throw new DriveApiError("Download operation response is invalid", 502);
+  }
+  const operationId = name.startsWith("operations/") ? name.slice("operations/".length) : name;
+  if (!/^[A-Za-z0-9._~-]{1,512}$/.test(operationId) || operationId === "." || operationId === "..") {
+    throw new DriveApiError("Download operation response is invalid", 502);
+  }
+  return operationId;
+}
+
+function assertNoOperationError(operation: DriveDownloadOperation): void {
+  if (Object.prototype.hasOwnProperty.call(operation, "error") && operation.error != null) {
+    throw new DriveApiError("Google Drive could not create a download session", 502);
+  }
+}
+
+function validateDownloadUri(value: unknown, payloadFileId: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 16_384) {
+    throw new DriveApiError("Google Drive returned an invalid download session", 502);
+  }
+
+  let uri: URL;
+  try {
+    uri = new URL(value);
+  } catch {
+    throw new DriveApiError("Google Drive returned an invalid download session", 502);
+  }
+
+  const hostname = uri.hostname.toLowerCase();
+  const isGoogleApiHost = hostname === "www.googleapis.com";
+  const isGoogleUserContentHost = hostname === "googleusercontent.com" || hostname.endsWith(".googleusercontent.com");
+  const expectedFilePath = `/drive/v3/files/${encodeURIComponent(payloadFileId)}`;
+  const invalidOAuthQuery = Array.from(uri.searchParams.keys()).some((key) =>
+    /^(access_token|oauth_token|refresh_token|id_token)$/i.test(key)
+  );
+
+  if (
+    uri.protocol !== "https:" ||
+    (!isGoogleApiHost && !isGoogleUserContentHost) ||
+    (isGoogleApiHost && uri.pathname !== expectedFilePath) ||
+    uri.username !== "" ||
+    uri.password !== "" ||
+    uri.port !== "" ||
+    uri.hash !== "" ||
+    invalidOAuthQuery
+  ) {
+    throw new DriveApiError("Google Drive returned an invalid download session", 502);
+  }
+
+  return uri.toString();
+}
+
+function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+  }
+
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
+function toDownloadSession(
+  operation: DriveDownloadOperation,
+  payloadFile: { id: string; resourceKey?: string },
+  encryptedSize: number,
+  operationResourceKey?: string
+): PayloadDownloadSession {
+  assertNoOperationError(operation);
+  if (operation.done !== true || !operation.response || typeof operation.response.partialDownloadAllowed !== "boolean") {
+    throw new DriveApiError("Google Drive returned an incomplete download session", 502);
+  }
+
+  const resourceKey = operationResourceKey ?? payloadFile.resourceKey;
+  if (resourceKey !== undefined && !validResourceKey(resourceKey)) {
+    throw new DriveApiError("Google Drive returned an invalid download session", 502);
+  }
+
+  return {
+    downloadUri: validateDownloadUri(operation.response.downloadUri, payloadFile.id),
+    partialDownloadAllowed: operation.response.partialDownloadAllowed,
+    payloadFileId: payloadFile.id,
+    encryptedSize,
+    ...(resourceKey ? { resourceKey } : {}),
+  };
+}
+
+export async function createPayloadDownloadSession(
   accessToken: string,
   metaFileId: string,
-  range?: string
-): Promise<Response> {
-  const payloadFile = await resolvePayloadFile(accessToken, metaFileId);
-  return driveGet(
-    accessToken,
-    `/files/${encodeURIComponent(payloadFile.id)}`,
-    { alt: "media" },
-    range ? { Range: range } : {}
-  );
+  signal?: AbortSignal
+): Promise<PayloadDownloadSession> {
+  const deadlineSignal = AbortSignal.timeout(MAX_DOWNLOAD_SESSION_MS);
+  const combinedSignal = signal ? AbortSignal.any([signal, deadlineSignal]) : deadlineSignal;
+
+  try {
+    const payloadFile = await resolvePayloadFile(accessToken, metaFileId, combinedSignal);
+    if (!payloadFile.size || !/^\d+$/.test(payloadFile.size)) {
+      throw new DriveApiError("Encrypted payload size is invalid", 502);
+    }
+    const encryptedSize = Number(payloadFile.size);
+    if (!Number.isSafeInteger(encryptedSize) || encryptedSize <= 0) {
+      throw new DriveApiError("Encrypted payload size is invalid", 502);
+    }
+    if (payloadFile.resourceKey !== undefined && !validResourceKey(payloadFile.resourceKey)) {
+      throw new DriveApiError("Encrypted payload metadata is invalid", 502);
+    }
+
+    const headers: Record<string, string> = authHeaders(accessToken);
+    if (payloadFile.resourceKey) {
+      headers["X-Goog-Drive-Resource-Keys"] = `${payloadFile.id}/${payloadFile.resourceKey}`;
+    }
+    const createResponse = await fetch(
+      `${DRIVE_API}/files/${encodeURIComponent(payloadFile.id)}/download`,
+      { method: "POST", headers, cache: "no-store", signal: combinedSignal }
+    );
+    if (!createResponse.ok) {
+      throw new DriveApiError("Google Drive could not create a download session", createResponse.status);
+    }
+
+    let operation = await createResponse.json() as DriveDownloadOperation;
+    let operationResourceKey: string | undefined;
+    let backoffMs = 1_000;
+
+    while (operation.done !== true) {
+      assertNoOperationError(operation);
+      if (operation.done !== false && operation.done !== null && operation.done !== undefined) {
+        throw new DriveApiError("Google Drive returned an invalid download session", 502);
+      }
+      if (operation.metadata?.resourceKey !== undefined) {
+        if (!validResourceKey(operation.metadata.resourceKey)) {
+          throw new DriveApiError("Google Drive returned an invalid download session", 502);
+        }
+        operationResourceKey = operation.metadata.resourceKey;
+      }
+
+      const operationId = downloadOperationId(operation.name);
+      await abortableDelay(backoffMs, combinedSignal);
+      const operationUrl = `${DRIVE_API}/operations/${encodeURIComponent(operationId)}`;
+      const pollHeaders: Record<string, string> = authHeaders(accessToken);
+      const pollResourceKey = operationResourceKey ?? payloadFile.resourceKey;
+      if (pollResourceKey) {
+        pollHeaders["X-Goog-Drive-Resource-Keys"] = `${payloadFile.id}/${pollResourceKey}`;
+      }
+      const pollResponse = await fetch(operationUrl, {
+        headers: pollHeaders,
+        cache: "no-store",
+        signal: combinedSignal,
+      });
+      if (!pollResponse.ok) {
+        throw new DriveApiError("Google Drive could not complete a download session", pollResponse.status);
+      }
+      operation = await pollResponse.json() as DriveDownloadOperation;
+      backoffMs = Math.min(backoffMs * 2, 8_000);
+    }
+
+    if (operation.metadata?.resourceKey !== undefined) {
+      if (!validResourceKey(operation.metadata.resourceKey)) {
+        throw new DriveApiError("Google Drive returned an invalid download session", 502);
+      }
+      operationResourceKey = operation.metadata.resourceKey;
+    }
+    return toDownloadSession(operation, payloadFile, encryptedSize, operationResourceKey);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    if (deadlineSignal.aborted) {
+      throw new DriveApiError("Download session creation timed out", 504);
+    }
+    if (error instanceof DriveApiError) throw error;
+    throw new DriveApiError("Unable to create download session", 502);
+  }
 }
 
 /**

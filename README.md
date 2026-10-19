@@ -2,7 +2,7 @@
 
 A secure, client-side encryption frontend for Google Drive. This project provides a Google Drive-like web interface where your files are stored on Google Drive, but their metadata and contents are fully end-to-end encrypted using `age-encryption`.
 
-All sensitive cryptographic operations—including passphrase-derived key creation and data decryption—occur strictly client-side in the browser. The Next.js backend serves merely as a secure proxy to fetch encrypted data from the Google Drive API, ensuring the server never sees your unencrypted data or your encryption key.
+All sensitive cryptographic operations, including passphrase-derived key creation and data decryption, occur strictly client-side in the browser. Original encrypted payload downloads and resumable upload data move directly between the browser and Google Drive. The Next.js backend handles authentication, small control requests, and bounded metadata operations. It never sees your unencrypted data or encryption key.
 
 ## Core Features
 
@@ -18,8 +18,9 @@ All sensitive cryptographic operations—including passphrase-derived key creati
   - Local search and sort use a dedicated browser worker so large decrypted folders stay responsive during reordering and filtering, with search inputs debounced (350ms) to avoid redundant computations.
   - File grids utilize a paginated layout (32 items per page) with responsive pagination controls to avoid DOM overload and ensure rapid rendering.
 - **Rclone Selection & Export**: Select specific files to export an ID list and fetch your raw encrypted data from Google Drive using Rclone command-line utilities.
-- **Browser Downloads**: From the selection toolbar, choose between exporting `files.txt` or fetching, decrypting, and saving the selected original files directly in the browser. Every decrypted card also has an individual download action.
-- **Streaming Media Preview**: Audio and video can start playing while the encrypted payload is still decrypting. Plaintext is written in bounded chunks to a temporary origin-private browser cache, allowing replay/seeking across already downloaded data without loading the full file into JavaScript memory. Unsupported formats fall back to Download.
+- **Browser Downloads**: From the selection toolbar, choose between exporting `files.txt` or fetching encrypted payloads directly from Google Drive, decrypting, and saving the selected originals in the browser. Individual and selected-file downloads share a three-file queue with per-file pause and resume controls. Paused files retain their progress and free a slot for waiting downloads. Recoverable read interruptions can Continue from the committed offset; write or integrity failures require discard and restart. A short-lived, read-only Google token is held only in the download source's memory.
+- **Streaming Media Preview**: MP4 previews fetch encrypted ranges directly from Google Drive and decrypt authenticated age records into MP4Box/MSE. Optional disk caching stores encrypted MP4 ranges; the normal MP4 path does not write plaintext to disk. Native/fallback formats use a direct encrypted stream and temporary plaintext browser storage where needed. Unsupported formats fall back to Download.
+- **Direct Encrypted Uploads**: Original payload and `.meta` ciphertext are uploaded directly to Google Drive resumable sessions. The browser sends no write bearer token; the server creates sessions and verifies metadata completion through small JSON control requests. Retry sessions live only in memory and are cleared by reload, reopening, or vault lock.
 - **Encrypted Metadata Editing**: Edit the fields stored in `details.json` and replace or remove the thumbnail from a decrypted card, then re-zip, re-encrypt, and update the same `.meta` file in Google Drive. Original payload files and Drive filenames are never changed.
 - **Modern UI/UX**: Built with Tailwind CSS v4 and Base UI, featuring custom scrollbars, micro-animations, and a highly polished dark mode.
 
@@ -38,7 +39,7 @@ All sensitive cryptographic operations—including passphrase-derived key creati
 
 For an in-depth look at how the system maintains zero-knowledge privacy while interacting with Google Drive:
 
-1. [Architecture & Decryption Flow](./docs/architecture.md) - Learn about the Google Drive proxy layer, client-side decryption pipeline, shared browser shell, and recursive search flow.
+1. [Architecture & Decryption Flow](./docs/architecture.md) - Learn about session setup, direct encrypted data transfers, client-side decryption, the shared browser shell, and recursive search.
 2. [Routes & Components](./docs/routes.md) - Understand the Next.js API endpoints, shared view components, and page-specific wiring.
 3. [CLI Tools & Selection Export](./docs/tools.md) - Details on browser downloads, Rclone export, folder-flattening, and the local Node.js decryption/packaging script tools.
 
@@ -62,7 +63,7 @@ For an in-depth look at how the system maintains zero-knowledge privacy while in
    AUTH_GOOGLE_SECRET=your_google_oauth_client_secret
    ```
    Set `DATABASE_URL` to a standard PostgreSQL connection URI. For a TLS-required hosted database, include `sslmode=verify-full`, for example `postgresql://user:password@db.example.com:5432/vaultdrive?sslmode=verify-full`. Local PostgreSQL may omit the `sslmode` query parameter when its server does not require TLS.
-   Ensure your Google OAuth application has the `https://www.googleapis.com/auth/drive` scope enabled. Existing users must sign in again after this scope changes so Google can issue a write-enabled token.
+   Ensure your Google OAuth application has the `https://www.googleapis.com/auth/drive` scope enabled for server-side Drive operations. The backend requests a separate short-lived token with exactly `https://www.googleapis.com/auth/drive.readonly` for direct browser payload reads. Existing users must sign in again after changing OAuth scopes so Google can issue the required server-side grant.
 
 3. **Initialize Better Auth Tables**:
    Set `DATABASE_URL` to a real PostgreSQL connection, then run:
@@ -79,3 +80,5 @@ For an in-depth look at how the system maintains zero-knowledge privacy while in
    ```
 
 5. Open [http://localhost:3000](http://localhost:3000) to login via Google and access your encrypted drive.
+
+Deploy the frontend and backend together. The old payload GET proxy returns 405, and the old upload chunk relay returns 410. In browser network tools, original payload GETs, preview Range requests, and upload chunk PUTs should target Google Drive. Session setup, metadata completion, and other JSON control requests should target the app.

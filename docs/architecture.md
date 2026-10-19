@@ -1,12 +1,12 @@
 # Architecture & Decryption Flow
 
-The Encrypted GDrive project acts as a secure, zero-knowledge overlay on top of Google Drive. By strictly separating storage (Google Drive), proxying (Next.js), and cryptography (Browser), the system ensures that sensitive data is never exposed unencrypted on any server.
+The Encrypted GDrive project acts as a secure, zero-knowledge overlay on top of Google Drive. Cryptography stays in the browser. The Next.js backend handles authentication, metadata operations, and small session-control requests, while original encrypted payload bytes move directly between the browser and Google Drive.
 
 ## High-Level Architecture
 
-1. **Frontend (Client-Side)**: React 19 application running in the browser. It handles state management, local/recursive/global search, and strictly executes all cryptographic operations (`age-encryption` and `fflate`) in memory.
-2. **Backend (Proxy/Auth Layer)**: Next.js API Routes. It manages OAuth sessions using Better Auth (persisting session data locally in SQLite) and acts as a secure proxy. It attaches the user's Google Drive OAuth token to fetch and replace encrypted blobs in the Google Drive API.
-3. **Storage Layer (Google Drive API)**: The actual Google Drive servers where files are stored. The data stored here consists of opaque folders, numbered age-encrypted payloads, and `.meta` files (age-encrypted metadata zip archives). A payload is paired with a `.meta` file by sharing its folder and using the `.meta` filename without the final suffix.
+1. **Frontend (Client-Side)**: React 19 application running in the browser. It handles state management, local/recursive/global search, and executes cryptographic operations (`age-encryption` and `fflate`) in memory.
+2. **Backend (Auth and Control Layer)**: Next.js API Routes use Better Auth with PostgreSQL through a standard `pg` pool. Google refresh and write credentials stay server-side. For each payload source, the backend requests an exact `drive.readonly` token from the existing refresh grant and returns that short-lived token with a validated download session. The browser keeps it only in the source's memory closure. Better Auth HTTP access-token and refresh-token paths are disabled; server-side auth APIs remain available.
+3. **Storage Layer (Google Drive API)**: Google Drive stores opaque folders, numbered age-encrypted payloads, and `.meta` files (age-encrypted metadata zip archives). A payload is paired with a `.meta` file by sharing its folder and using the `.meta` filename without the final suffix.
 
 ## Shared Client Architecture
 
@@ -16,10 +16,10 @@ The current frontend separates page-specific data discovery from shared file-bro
 2. **View Shell**: `components/drive-file-browser.tsx` owns the shared file toolbar, inline search, sorting, refresh button, empty states, and `MetaGrid` rendering.
 3. **Prompt Handling**: `components/decryption-error-dialog.tsx` and `hooks/use-decryption-error-prompt.ts` own the wrong-passphrase / stop / re-enter flow for both normal and recursive pages.
 4. **Decryption Helpers**: `lib/meta-decryption.ts` centralizes the shared worker/decrypt/update helpers used by `useMetaFiles` and `useRecursiveMetaFiles`.
-5. **Download Pipeline**: `components/file-download-provider.tsx` resolves encrypted payloads through the authenticated API, passes the response body through age stream decryption, validates the small CLI-compatible filename header, and writes plaintext chunks directly to disk when the browser supports the File System Access API.
+5. **Download Pipeline**: Individual and selected-file downloads share a queue with at most three active files. `components/file-download-provider.tsx` uses the random-access age reader to fetch authenticated encrypted records directly from Google Drive, validate the CLI-compatible filename header, and write bounded plaintext chunks to disk when the browser supports the File System Access API. Pausing aborts the current request and frees its queue slot after any pending disk write settles. Resuming continues from the committed plaintext offset, retaining the destination and progress until completion or session cleanup. Browsers without direct file access retain decrypted chunks in memory for the final Blob download.
 6. **Metadata Edit Pipeline**: `MetaDetailModal` edits the in-memory `details.json` object and thumbnail bytes, `lib/crypto.ts` creates a new ZIP and age ciphertext in the browser, and `PUT /api/drive/meta/[fileId]` replaces only the existing `.meta` file content through the authenticated Drive API.
-7. **Upload Pipeline**: `UploadModal` creates the small encrypted `.meta` sidecar first. The original is then read from `File.slice()` in bounded chunks, given the same CLI filename header, age-encrypted locally, and sent with a Drive resumable upload. Drive sees only opaque numeric `<id>.meta` and `<id>` names.
-8. **Media Preview Pipeline**: Audio/video previews consume the payload's one-pass decrypted stream once. Each plaintext chunk is written at its offset to an origin-private OPFS temporary file and appended to a `MediaSource` buffer. The browser never assembles the original in JavaScript memory. If MSE evicts a range, the player rebuilds the buffer by reading bounded chunks back from OPFS. Unsupported codecs fall back to the normal download action.
+7. **Upload Pipeline**: `UploadModal` asks the server to allocate an empty opaque `.meta` file and a Drive resumable session. The browser uploads encrypted metadata directly, then asks the server to verify its exact size before creating a payload session. The original is read from `File.slice()` in bounded chunks, given the CLI filename header, age-encrypted locally, and uploaded directly to Drive. The browser sends no write bearer token. Drive sees only opaque numeric `<id>.meta` and `<id>` names. Upload sessions and their sealed age context exist only in provider memory, so reload, reopen, or vault lock ends the ability to resume; clearing history does not delete Drive files.
+8. **Media Preview Pipeline**: MP4 previews request a session and fetch encrypted ranges directly from Google Drive. The random-access age reader decrypts authenticated records in memory for MP4Box/MSE; optional disk caching stores encrypted ranges only. Native/fallback formats fetch a direct encrypted stream and use temporary plaintext browser storage where needed. The existing playback loops, seek, and preload behavior remain unchanged.
 
 ## Data Flow: Google OAuth to Decryption
 
@@ -37,7 +37,7 @@ sequenceDiagram
 
     User->>Client (React): Login via Google OAuth
     Client (React)->>Next.js API: Create Session (Better Auth)
-    Next.js API-->>Client (React): Google Drive Access Token Stored
+    Next.js API-->>Client (React): Auth session only; Drive credentials stay server-side
     
     User->>PassphraseGate: Enters Passphrase
     PassphraseGate->>Client (React): setPassphrase(password)
@@ -76,21 +76,31 @@ sequenceDiagram
     Next.js API-->>Client (React): Updated Drive file record
     Client (React)-->>User: Refresh edited card and thumbnail
 
-    User->>Client (React): Click Download on a card or selected-file action
-    Client (React)->>Next.js API: Request paired payload using meta file ID
-    Next.js API->>Google Drive API: Resolve same-parent filename without .meta, then GET payload
-    Google Drive API-->>Next.js API: Encrypted payload bytes
-    Next.js API-->>Client (React): Encrypted payload bytes
-    Client (React)->>Client (React): Worker decrypts payload and parses filename header
-    Client (React)-->>User: Save plaintext file with embedded original filename
+    User->>Client (React): Click Download or Preview
+    Client (React)->>Next.js API: POST payload meta ID for a download session
+    Next.js API->>Google Drive API: Resolve secure pair and start files.download operation
+    Google Drive API-->>Next.js API: Operation with download URI
+    loop While operation is pending
+        Next.js API->>Google Drive API: GET operations/{name}
+        Google Drive API-->>Next.js API: Operation status
+    end
+    Next.js API-->>Client (React): JSON URI, pinned file size, and short-lived drive.readonly token
+    Client (React)->>Google Drive API: Direct HTTPS GET or Range GET with read-only bearer
+    Google Drive API-->>Client (React): Encrypted payload bytes (never relayed by Next.js)
+    Client (React)->>Client (React): Age decrypt and validate authenticated payload records and filename header
+    Client (React)-->>User: Save plaintext file or play preview
+    Note over Client (React): MP4 uses memory or encrypted range cache; native fallback may cache plaintext
 
-    User->>Client (React): Preview audio or video
-    Client (React)->>Next.js API: Request encrypted paired payload
-    Next.js API-->>Client (React): Encrypted stream
-    Client (React)->>Client (React): age-decrypt one pass
-    Client (React)->>Client (React): Write bounded plaintext chunks to OPFS
-    Client (React)->>Client (React): Append bounded chunks to MediaSource
-    Client (React)-->>User: Play while download/decryption continues
+    User->>Client (React): Upload a new file
+    Client (React)->>Next.js API: JSON request for metadata upload session
+    Next.js API->>Google Drive API: Create empty metadata file and resumable session
+    Next.js API-->>Client (React): Metadata session JSON
+    Client (React)->>Google Drive API: Direct PUT encrypted .meta chunks
+    Client (React)->>Next.js API: POST meta-complete JSON
+    Next.js API->>Google Drive API: Verify exact metadata size and update upload state
+    Client (React)->>Next.js API: Request payload upload session JSON
+    Next.js API-->>Client (React): Payload session JSON
+    Client (React)->>Google Drive API: Direct PUT age-encrypted payload chunks
 ```
 
 ## Security Guarantees
@@ -99,9 +109,13 @@ sequenceDiagram
 - Metadata saves update the existing `.meta` file's content only. The paired original payload and all Google Drive file naming/parent metadata remain untouched.
 - The `identityRef` derived from the passphrase is held strictly in memory and clears on reload or when the key is explicitly replaced or cleared.
 - The `.meta` blobs and payloads stored in Google Drive are completely opaque. Metadata is a zip containing JSON and thumbnails, while payloads contain a filename header and file bytes; both are encrypted using `age-encryption`.
-- Original-file downloads fetch encrypted payload bytes through the server proxy, but age decryption, filename parsing, and plaintext Blob creation all happen in the browser. Plaintext is not sent back to the server.
-- Better SQLite3 is used locally purely for Better Auth session management (if the Next.js app is hosted), keeping OAuth tokens secure.
-- Media preview plaintext is temporarily cached in the browser's origin-private file system so seeking and MSE replay are possible. The cache contains only opaque Drive IDs, is never uploaded, is removed on vault lock or when manually cleared, and expires after two hours of inactivity. This is a deliberate usability tradeoff: previews require trusting the unlocked browser profile during that period.
+- The payload endpoint is authenticated `POST /api/drive/payload/{metaId}` and returns session JSON only. `GET` returns 405. The backend never fetches or relays the encrypted payload bytes.
+- The backend mints a short-lived token requesting exactly `https://www.googleapis.com/auth/drive.readonly` and validates that Google returned exactly that scope. Only this read-only token is returned to the browser, held in the per-download or per-preview source closure, and cleared when the source closes or its parent aborts. It is not stored in localStorage, sessionStorage, OPFS, or React Query. Refresh tokens and write-capable credentials remain server-side.
+- Direct range reads require `partialDownloadAllowed` and a real HTTP 206. Google CORS does not expose `Content-Range`, so the source validates the exposed `Content-Length` against the requested range and authenticated encrypted size, then synthesizes `Content-Range` locally for the age reader. Payload ID and size stay pinned across token renewal. Authenticated age records still verify their contents.
+- Original-file downloads fetch encrypted payload bytes directly from Google Drive. Age decryption, filename parsing, and plaintext file creation all happen in the browser. Plaintext is not sent to the server.
+- Better Auth uses PostgreSQL through the `pg` pool. The server uses its internal auth API for OAuth refreshes while browser-facing token access paths are disabled.
+- For standard PostgreSQL URLs, legacy `sslmode=prefer`, `require`, or `verify-ca` is normalized to `verify-full` unless `uselibpqcompat=true`, preserving CA and hostname verification while avoiding the pg parser deprecation warning.
+- Native/fallback preview plaintext may be temporarily cached in browser storage for playback and replay. That cache is not uploaded, is removed on vault lock or when manually cleared, and expires after two hours of inactivity. MP4 previews use memory and optionally cache encrypted ranges, which are removed when the preview closes.
 
 ## Search Pipeline
 
