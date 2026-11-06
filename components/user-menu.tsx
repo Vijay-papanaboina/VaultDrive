@@ -15,8 +15,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { KeyRound, Copy, Check, Eye, EyeOff, LogOut, Shield } from "lucide-react";
+import { KeyRound, Copy, Check, Eye, EyeOff, LogOut, Shield, SlidersHorizontal } from "lucide-react";
 import { useMediaPreview } from "@/components/media-preview-provider";
+import { DownloadSettingsDialog } from "@/components/download-settings-dialog";
 
 interface AgeKeysDialogProps {
   isOpen: boolean;
@@ -138,6 +139,7 @@ export function UserMenu() {
   const { getPassphrase } = useCrypto();
   const { encryptedPreviewDiskCacheEnabled, setEncryptedPreviewDiskCacheEnabled } = useMediaPreview();
   const [isKeysOpen, setIsKeysOpen] = useState(false);
+  const [isDownloadSettingsOpen, setIsDownloadSettingsOpen] = useState(false);
   const user = session?.user;
   const identity = getPassphrase();
 
@@ -181,6 +183,15 @@ export function UserMenu() {
           >
             Cache encrypted MP4 preview ranges on disk
           </DropdownMenuCheckboxItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            id="download-settings-btn"
+            className="gap-2 text-foreground focus:text-foreground cursor-pointer"
+            onClick={() => setIsDownloadSettingsOpen(true)}
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
+            Download settings
+          </DropdownMenuItem>
           {identity && (
             <>
               <DropdownMenuSeparator />
@@ -213,6 +224,10 @@ export function UserMenu() {
           identity={identity}
         />
       )}
+      <DownloadSettingsDialog
+        isOpen={isDownloadSettingsOpen}
+        onClose={() => setIsDownloadSettingsOpen(false)}
+      />
     </>
   );
 }

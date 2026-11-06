@@ -16,6 +16,7 @@ interface SelectionContextValue {
   toggleSelectionMode: () => void;
   selectedFiles: SelectedFile[];
   toggleFileSelection: (file: SelectedFile) => void;
+  removeFileSelection: (metaFileId: string) => void;
   clearSelection: () => void;
   isFileSelected: (id: string) => boolean;
   exportFilesList: () => string; // returns the rclone file content string
@@ -45,6 +46,10 @@ export function SelectionProvider({ children }: { children: ReactNode }) {
 
   const clearSelection = useCallback(() => {
     setSelectedFiles([]);
+  }, []);
+
+  const removeFileSelection = useCallback((metaFileId: string) => {
+    setSelectedFiles((previous) => previous.filter((file) => file.metaFileId !== metaFileId));
   }, []);
 
   useEffect(() => registerSensitiveCleanup(clearSelection), [clearSelection, registerSensitiveCleanup]);
@@ -81,6 +86,7 @@ export function SelectionProvider({ children }: { children: ReactNode }) {
         toggleSelectionMode,
         selectedFiles,
         toggleFileSelection,
+        removeFileSelection,
         clearSelection,
         isFileSelected,
         exportFilesList,

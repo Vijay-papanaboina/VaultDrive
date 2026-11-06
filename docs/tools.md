@@ -16,7 +16,7 @@ To download files, VaultDrive provides a bulk-download helper pipeline:
 1. **Select Files**: Click the **Select Files** button in the [DriveHeader](../components/drive-header.tsx) to activate selection checkboxes.
 2. **Select Target Files**: Click on individual file cards or use global search to select files across multiple visited folders.
 3. **Choose a download mode** from the header:
-   - **Download Original Files** fetches each paired payload, stream-decrypts it in the browser, and saves the plaintext using the filename embedded in the payload. Chromium browsers with File System Access support write chunks directly to disk; other browsers use a Blob fallback. Individual and selected-file downloads share a FIFO queue capped at three active files.
+   - **Download Original Files** fetches each paired payload, stream-decrypts it in the browser, and saves the plaintext using the filename embedded in the payload. Chromium browsers with File System Access support write chunks directly to disk; other browsers use a Blob fallback. Individual and selected-file downloads share a FIFO queue, defaulting to three active files and four ordered range requests per file.
    - **Download File List** downloads a local `files.txt` containing a line-separated list of relative folder paths and numeric payload filenames.
 4. **Fetch Using Rclone** (for the file-list mode): An interactive dialog displays the rclone commands to copy the encrypted files to your machine using the downloaded `files.txt`:
    ```bash

@@ -4,9 +4,16 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { useCrypto } from "@/hooks/use-crypto";
 import { openRandomAccessAgeReader, type RandomAccessAgeReader } from "@/lib/random-access-age-reader";
 import { PayloadTransportError } from "@/lib/direct-payload-source";
+import {
+  DEFAULT_DOWNLOAD_SETTINGS,
+  DOWNLOAD_SETTINGS_STORAGE_KEY,
+  isDownloadSettingValue,
+  parseDownloadSettings,
+  type DownloadSettings,
+} from "@/lib/download-settings";
+import { runParallelDownload } from "@/lib/parallel-download";
 
 const DOWNLOAD_READ_BYTES = 3 * 1024 * 1024;
-const MAX_ACTIVE_DOWNLOADS = 3;
 
 export interface FileDownloadTarget {
   metaFileId: string;
@@ -118,6 +125,8 @@ interface DownloadJob {
 interface FileDownloadContextValue {
   downloadItems: Record<string, DownloadItem>;
   batch: BatchDownloadState | null;
+  downloadSettings: DownloadSettings;
+  setDownloadSettings: (partial: Partial<DownloadSettings>) => void;
   downloadFile: (target: FileDownloadTarget) => Promise<void>;
   downloadSelected: (targets: FileDownloadTarget[]) => Promise<BatchDownloadResult>;
   pauseDownload: (metaFileId: string) => void;
@@ -238,6 +247,9 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
   const { getPassphrase, registerSensitiveCleanup } = useCrypto();
   const [downloadItems, setDownloadItems] = useState<Record<string, DownloadItem>>({});
   const [batch, setBatch] = useState<BatchDownloadState | null>(null);
+  const [downloadSettings, setDownloadSettingsState] = useState<DownloadSettings>(DEFAULT_DOWNLOAD_SETTINGS);
+  const settingsRef = useRef<DownloadSettings>({ ...DEFAULT_DOWNLOAD_SETTINGS });
+  const settingsLoadedRef = useRef(false);
   const jobsRef = useRef(new Map<string, DownloadJob>());
   const pendingSingleRef = useRef(new Map<string, DownloadJob>());
   const queueRef = useRef<DownloadJob[]>([]);
@@ -247,6 +259,51 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
   const fallbackUrlsRef = useRef(new Set<string>());
   const directoryNamesRef = useRef(new WeakMap<FileDestination, Map<string, string>>());
   const sensitiveGenerationRef = useRef(0);
+
+  useEffect(() => {
+    let mounted = true;
+    queueMicrotask(() => {
+      try {
+        const stored = window.localStorage.getItem(DOWNLOAD_SETTINGS_STORAGE_KEY);
+        if (mounted && stored !== null) {
+          const loaded = parseDownloadSettings(JSON.parse(stored));
+          settingsRef.current = loaded;
+          setDownloadSettingsState(loaded);
+        }
+      } catch {
+        // Blocked or malformed preferences leave the in-memory defaults active.
+      } finally {
+        if (mounted) {
+          settingsLoadedRef.current = true;
+          pumpRef.current();
+        }
+      }
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  const setDownloadSettings = useCallback((partial: Partial<DownloadSettings>) => {
+    const candidate = typeof partial === "object" && partial !== null
+      ? partial
+      : {};
+    const current = settingsRef.current;
+    const next: DownloadSettings = {
+      parallelDownloads: isDownloadSettingValue(candidate.parallelDownloads)
+        ? candidate.parallelDownloads
+        : current.parallelDownloads,
+      requestsPerDownload: isDownloadSettingValue(candidate.requestsPerDownload)
+        ? candidate.requestsPerDownload
+        : current.requestsPerDownload,
+    };
+    settingsRef.current = next;
+    setDownloadSettingsState(next);
+    try {
+      window.localStorage.setItem(DOWNLOAD_SETTINGS_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Preferences still apply for this provider lifetime when storage is blocked.
+    }
+    pumpRef.current();
+  }, []);
 
   const updateItem = useCallback(
     (metaFileId: string, update: Partial<DownloadItem>) => {
@@ -430,7 +487,7 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
   const runJob = useCallback(
     async (job: DownloadJob, run: AbortController) => {
       const generation = job.generation;
-      let phase: "setup" | "bootstrap" | "destination" | "read" | "write" | "between" | "finalize" = "setup";
+      const phase: { current: "setup" | "bootstrap" | "destination" | "read" | "write" | "between" | "finalize" } = { current: "setup" };
       const ensureLifetime = () => {
         if (sensitiveGenerationRef.current !== generation || job.lifetime.signal.aborted) {
           throw abortError();
@@ -444,7 +501,7 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
       try {
         ensureRun();
         if (!job.reader) {
-          phase = "bootstrap";
+          phase.current = "bootstrap";
           setJobItem(job, "resolving");
           if (!job.identity) throw new Error("Download identity is unavailable. Retry the download.");
           const reader = await openRandomAccessAgeReader({
@@ -460,7 +517,7 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
           job.reader = reader;
           job.identity = null;
           job.filename = safeFilename(reader.filename || job.target.fallbackName || "download");
-          phase = "between";
+          phase.current = "between";
           ensureRun();
           setJobItem(job, "streaming");
         }
@@ -483,14 +540,14 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
         }
 
         if (job.destination && !job.writer) {
-          phase = "destination";
+          phase.current = "destination";
           const writer = await job.destination.open(job.filename);
           if (sensitiveGenerationRef.current !== generation || job.lifetime.signal.aborted) {
             await writer.abort?.(abortError()).catch(() => undefined);
             throw abortError();
           }
           job.writer = writer;
-          phase = "between";
+          phase.current = "between";
           ensureRun();
         }
 
@@ -499,34 +556,37 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
           filename: job.filename,
           expectedSize: reader.originalSize,
         });
-        while (job.committedOffset < reader.originalSize) {
-          ensureRun();
-          const length = Math.min(DOWNLOAD_READ_BYTES, reader.originalSize - job.committedOffset);
-          phase = "read";
-          const value = await reader.read(job.committedOffset, length, run.signal);
-          ensureRun();
-          if (value.byteLength !== length) throw new Error("Decrypted download ended before the expected file size.");
-          if (job.writer) {
-            phase = "write";
-            await job.writer.write(value);
-          } else {
-            job.chunks.push(value);
-          }
-          ensureLifetime();
-          job.committedOffset += value.byteLength;
-          phase = "between";
-          updateItem(job.target.metaFileId, {
-            bytesWritten: job.committedOffset,
-            expectedSize: reader.originalSize,
-            filename: job.filename,
-          });
-          ensureRun();
-          if (job.writer) value.fill(0);
-        }
+        await runParallelDownload({
+          start: job.committedOffset,
+          end: reader.originalSize,
+          chunkSize: DOWNLOAD_READ_BYTES,
+          getConcurrency: () => settingsRef.current.requestsPerDownload,
+          signal: run.signal,
+          read: (offset, length, signal) => reader.read(offset, length, signal),
+          write: async (bytes) => {
+            if (job.writer) await job.writer.write(bytes);
+            else job.chunks.push(bytes);
+          },
+          retainWrittenBytes: !job.writer,
+          onCommit: (offset, length) => {
+            ensureLifetime();
+            if (job.committedOffset !== offset) {
+              throw new Error("Download commit offset changed unexpectedly.");
+            }
+            job.committedOffset = offset + length;
+            updateItem(job.target.metaFileId, {
+              bytesWritten: job.committedOffset,
+              expectedSize: reader.originalSize,
+              filename: job.filename,
+            });
+          },
+          onPhase: (nextPhase) => { phase.current = nextPhase; },
+          assertCurrent: ensureLifetime,
+        });
 
         ensureRun();
         job.finalizing = true;
-        phase = "finalize";
+        phase.current = "finalize";
         setJobItem(job, "finalizing");
         if (job.writer) {
           await job.writer.close();
@@ -548,13 +608,13 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
           run.signal.aborted &&
           !job.lifetime.signal.aborted &&
           sensitiveGenerationRef.current === generation &&
-          (phase === "bootstrap" || phase === "read" || phase === "between")
+          (phase.current === "bootstrap" || phase.current === "read" || phase.current === "between")
         ) {
           return;
         }
         if (
           error instanceof PayloadTransportError &&
-          (phase === "bootstrap" || phase === "read") &&
+          (phase.current === "bootstrap" || phase.current === "read") &&
           sensitiveGenerationRef.current === generation &&
           !job.terminal
         ) {
@@ -577,7 +637,8 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
   );
 
   const pumpQueue = useCallback(() => {
-    while (activeCountRef.current < MAX_ACTIVE_DOWNLOADS && queueRef.current.length > 0) {
+    if (!settingsLoadedRef.current) return;
+    while (activeCountRef.current < settingsRef.current.parallelDownloads && queueRef.current.length > 0) {
       const job = queueRef.current.shift();
       if (!job || job.terminal || job.paused || job.generation !== sensitiveGenerationRef.current) continue;
       job.queued = false;
@@ -617,6 +678,7 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
   }, [runJob, setJobItem]);
   useEffect(() => {
     pumpRef.current = pumpQueue;
+    if (settingsLoadedRef.current) pumpQueue();
   }, [pumpQueue]);
 
   const clearSensitiveState = useCallback(() => {
@@ -960,6 +1022,8 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
       value={{
         downloadItems,
         batch,
+        downloadSettings,
+        setDownloadSettings,
         downloadFile,
         downloadSelected,
         pauseDownload,

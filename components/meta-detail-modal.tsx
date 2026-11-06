@@ -31,8 +31,10 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { FileDownloadButton } from "@/components/file-download-button";
+import { FileDeleteButton } from "@/components/file-delete-button";
 import { MediaPreviewButton } from "@/components/media-preview-button";
 import { inferMimeType } from "@/lib/crypto";
+import { useFileDelete } from "@/components/file-delete-provider";
 
 interface MetaDetailModalProps {
   meta: DecryptedMeta | null;
@@ -41,7 +43,7 @@ interface MetaDetailModalProps {
 }
 
 function formatBytes(bytes: number): string {
-  if (!bytes || bytes === 0) return "—";
+  if (!bytes || bytes === 0) return "0 B";
   const k = 1024;
   const sizes = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -113,6 +115,7 @@ function MetaDetailContent({
   onSaved?: (meta: DecryptedMeta) => void;
 }) {
   const { getPassphrase, registerSensitiveCleanup } = useCrypto();
+  const { deletedMetaFileIds } = useFileDelete();
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const operationGenerationRef = useRef(0);
@@ -228,6 +231,7 @@ function MetaDetailContent({
     const ensureCurrent = () => {
       if (
         generation !== operationGenerationRef.current ||
+        deletedMetaFileIds.has(meta.driveFile.id) ||
         identity !== getPassphrase()
       ) {
         throw new DOMException("Metadata save cancelled", "AbortError");
@@ -356,7 +360,7 @@ function MetaDetailContent({
 
         {!isEditing ? (
           <>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               {isMedia && <MediaPreviewButton target={{ metaFileId: driveFile.id, displayName: details.name || originalFileName, originalFileName, mimeType: mediaMime, expectedSize: details.extra?.size_bytes !== undefined ? Number(details.extra.size_bytes) : Number(driveFile.size) }} showLabel className="flex-1 justify-center" />}
               <FileDownloadButton
                 target={{
@@ -379,6 +383,11 @@ function MetaDetailContent({
                 <Pencil className="h-3.5 w-3.5" />
                 Edit
               </Button>
+              <FileDeleteButton
+                target={{ driveFile, displayName: details.name || originalFileName }}
+                showLabel
+                className="border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/20"
+              />
             </div>
 
             {savedMessage && (
@@ -570,14 +579,16 @@ function MetaDetailContent({
 }
 
 export function MetaDetailModal({ meta, onClose, onSaved }: MetaDetailModalProps) {
+  const { deletedMetaFileIds } = useFileDelete();
+  const visibleMeta = meta && !deletedMetaFileIds.has(meta.driveFile.id) ? meta : null;
   return (
-    <Dialog open={!!meta} onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog open={!!visibleMeta} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent
         id="meta-detail-modal"
         showCloseButton={false}
         className="max-h-[95vh] w-full max-w-sm overflow-hidden border-white/10 p-0 sm:max-w-lg md:max-w-4xl lg:max-w-5xl"
       >
-        {meta && <MetaDetailContent key={meta.driveFile.id} meta={meta} onClose={onClose} onSaved={onSaved} />}
+        {visibleMeta && <MetaDetailContent key={visibleMeta.driveFile.id} meta={visibleMeta} onClose={onClose} onSaved={onSaved} />}
       </DialogContent>
     </Dialog>
   );

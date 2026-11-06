@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { ArrowUpDown, ChevronDown, FileX, RefreshCw, Search, X } from "lucide-react";
 import { MetaGrid } from "@/components/meta-grid";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useDriveFileBrowserState } from "@/hooks/use-drive-file-browser-state";
 import type { ProgressiveMetaFile } from "@/types";
+import { useFileDelete } from "@/components/file-delete-provider";
 
 interface DriveFileBrowserProps {
   folderId: string;
@@ -47,6 +48,11 @@ export function DriveFileBrowser({
   noMatchesMessage,
   deferSortChange = false,
 }: DriveFileBrowserProps) {
+  const { deletedMetaFileIds } = useFileDelete();
+  const visibleFiles = useMemo(
+    () => files.filter((file) => !deletedMetaFileIds.has(file.driveFile.id)),
+    [deletedMetaFileIds, files]
+  );
   const {
     searchQuery,
     setSearchQuery,
@@ -57,12 +63,12 @@ export function DriveFileBrowser({
     handleSortChange,
     toggleSortOrder,
   } = useDriveFileBrowserState({
-    files,
+    files: visibleFiles,
     folderId,
     deferSortChange,
   });
 
-  const showMetaSection = files.length > 0 || isListLoading || !!error;
+  const showMetaSection = visibleFiles.length > 0 || isListLoading || !!error;
 
   return (
     <section className="space-y-3">
@@ -165,7 +171,7 @@ export function DriveFileBrowser({
         <div className="rounded-xl border border-white/8 bg-white/3 py-12 text-center">
           <p className="text-sm text-muted-foreground">{emptyMessage}</p>
         </div>
-      ) : files.length > 0 && resultCount === 0 ? (
+      ) : visibleFiles.length > 0 && resultCount === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-xl border border-white/8 bg-white/3 py-16 text-center">
           <FileX className="h-10 w-10 text-muted-foreground/40" />
           <div>

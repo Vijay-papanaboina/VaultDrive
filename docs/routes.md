@@ -17,7 +17,7 @@ Better Auth stores application sessions and OAuth credentials in PostgreSQL thro
 - `/api/auth/[...all]/route.ts`: Better Auth endpoints managing Google OAuth, session cookies, and PostgreSQL connections. HTTP access-token and refresh-token paths are disabled.
 - `/api/drive/folders/route.ts`: Proxies requests to `lib/google-drive.ts` (`listFolders`). Queries the Google Drive API for folder structures within a specified parent ID.
 - `/api/drive/meta/route.ts`: Queries the list of `.meta` files inside a given parent folder and hides incomplete metadata uploads.
-- `/api/drive/meta/[fileId]/route.ts`: `GET` fetches bounded encrypted `.meta` bytes. `PUT` remains a separate bounded proxy operation that accepts an already encrypted `application/octet-stream` body and replaces only that Drive file's content after checking the optional `If-Unmodified-Since` value.
+- `/api/drive/meta/[fileId]/route.ts`: `GET` fetches bounded encrypted `.meta` bytes. `PUT` remains a separate bounded proxy operation that accepts an already encrypted `application/octet-stream` body and replaces only that Drive file's content after checking the optional `If-Unmodified-Since` value. `DELETE` moves the verified `.meta` and original pair to recoverable Google Drive Trash after explicit confirmation; clearing transfer history does not delete Drive files.
 - `/api/drive/payload/[metaFileId]/route.ts`: Authenticated `POST` resolves the securely paired payload and creates a Google `files.download` operation. It polls pending operations server-side and returns JSON with a validated `downloadUri`, encrypted size, resource key when present, and a short-lived `drive.readonly` token. The browser sends the resource key on direct Google requests when present. The route never fetches or relays payload bytes. `GET` returns 405, with no proxy fallback.
 - `/api/drive/path/route.ts`: Resolves folder path lineage by walking up the parent tree in Google Drive, returning breadcrumb data.
 
@@ -79,7 +79,7 @@ The UI is broken down into specific interactive client components ensuring optim
    - Renders a paginated grid of `MetaCard` elements (32 items per page), empty states, error states, and the detail modal.
 
 9. `FileDownloadProvider` and `FileDownloadButton`:
-   - Share one FIFO download queue across cards, detail modals, and the header, with up to three active files.
+   - Share one FIFO download queue across cards, detail modals, and the header, defaulting to three active files and four ordered range requests per file. Both limits are configurable from one to six.
    - Request session JSON from the app, then fetch encrypted payload bytes directly from Google Drive. The short-lived read-only token stays in the source closure, not localStorage, sessionStorage, OPFS, or React Query.
    - Display queued, paused, preparing, decrypting/writing, finalizing, success, and retry states. Pause retains the committed plaintext offset, and resume continues from that point. Recoverable read or connection failures can Continue from the committed offset; write or integrity failures require discard and restart. Supported browsers write decrypted chunks directly to disk; other browsers use a Blob fallback.
 

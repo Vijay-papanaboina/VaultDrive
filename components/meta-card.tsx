@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FileDownloadButton } from "@/components/file-download-button";
+import { FileDeleteButton } from "@/components/file-delete-button";
 import { MediaPreviewButton } from "@/components/media-preview-button";
 import { inferMimeType } from "@/lib/crypto";
 import type { ProgressiveMetaFile } from "@/types";
@@ -25,7 +26,7 @@ interface MetaCardProps {
 }
 
 function formatBytes(bytes: number): string {
-  if (!bytes || bytes === 0) return "—";
+  if (!bytes || bytes === 0) return "0 B";
   const k = 1024;
   const sizes = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -81,7 +82,7 @@ export const MetaCard = memo(
         className={`group flex flex-col overflow-hidden transition-all duration-200 ${
           isClickable
             ? "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            : "pointer-events-none select-none"
+            : "select-none"
         } ${
           isSelected
             ? "border-violet-500 bg-violet-600/5 shadow-md shadow-violet-500/5"
@@ -105,22 +106,29 @@ export const MetaCard = memo(
             </div>
           )}
 
-          {decrypted && !decryptError && (
-            <div className="absolute right-2.5 top-2.5 z-10 flex gap-1.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-            {isMedia && <MediaPreviewButton target={{ metaFileId: driveFile.id, displayName: details?.name ?? originalFileName, originalFileName, mimeType: mediaMime, expectedSize: details?.extra?.size_bytes !== undefined ? Number(details.extra.size_bytes) : Number(driveFile.size) }} />}
-            <FileDownloadButton
-              target={{
-                metaFileId: driveFile.id,
-                fallbackName: details?.name ?? originalFileName,
-                expectedSize:
-                  details?.extra?.size_bytes !== undefined
-                    ? Number(details.extra.size_bytes)
-                    : Number(driveFile.size),
-              }}
-              className=""
-            />
+          {(decrypted && !decryptError) || meta.status === "error" ? (
+            <div className="absolute right-2.5 top-2.5 z-10 flex gap-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+              {decrypted && !decryptError && (
+                <>
+                  {isMedia && <MediaPreviewButton target={{ metaFileId: driveFile.id, displayName: details?.name ?? originalFileName, originalFileName, mimeType: mediaMime, expectedSize: details?.extra?.size_bytes !== undefined ? Number(details.extra.size_bytes) : Number(driveFile.size) }} />}
+                  <FileDownloadButton
+                    target={{
+                      metaFileId: driveFile.id,
+                      fallbackName: details?.name ?? originalFileName,
+                      expectedSize:
+                        details?.extra?.size_bytes !== undefined
+                          ? Number(details.extra.size_bytes)
+                          : Number(driveFile.size),
+                    }}
+                    className=""
+                  />
+                </>
+              )}
+              <FileDeleteButton
+                target={{ driveFile, displayName: details?.name ?? originalFileName }}
+              />
             </div>
-          )}
+          ) : null}
 
           {meta.status === "pending" || meta.status === "downloading" ? (
             <Skeleton className="h-full w-full rounded-none" />
@@ -153,7 +161,7 @@ export const MetaCard = memo(
             </div>
           )}
 
-          {/* Hover overlay — only show if clickable */}
+          {/* Hover overlay shown only when the card is clickable */}
           {isClickable && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
               <span className="rounded-full border border-white/30 bg-black/50 px-3 py-1 text-xs font-medium text-white backdrop-blur-sm">
@@ -209,7 +217,7 @@ export const MetaCard = memo(
             </p>
           )}
 
-          {/* Meta row — size and modified date are unencrypted on GDrive, show immediately! */}
+          {/* Meta row with unencrypted size and modified date */}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <span className="flex items-center gap-1">
               <Calendar className="h-3 w-3" />

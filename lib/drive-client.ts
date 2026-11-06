@@ -25,11 +25,35 @@ export async function fetchBreadcrumbs(folderId: string, bypassCache = false): P
 export async function fetchMetaList(folderId: string, bypassCache = false): Promise<DriveMetaFile[]> {
   const res = await fetch(
     `/api/drive/meta?folderId=${folderId}`,
-    bypassCache ? { cache: "no-store" } : undefined
+    { cache: bypassCache ? "reload" : "no-cache" }
   );
   if (!res.ok) throw new Error(`Failed to list meta files: HTTP ${res.status}`);
   const data = await res.json();
   return data.files as DriveMetaFile[];
+}
+
+export async function trashMetaFile(
+  metaFileId: string,
+  expectedMetaName: string,
+  expectedModifiedTime: string,
+  signal?: AbortSignal
+): Promise<{ metaFileId: string; payloadFileId: string }> {
+  const response = await fetch(`/api/drive/meta/${encodeURIComponent(metaFileId)}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expectedMetaName, expectedModifiedTime }),
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok) {
+    const message = (await response.text()).trim();
+    throw new Error(message || "Could not move this file pair to Trash.");
+  }
+  const result = await response.json() as { metaFileId?: unknown; payloadFileId?: unknown };
+  if (result.metaFileId !== metaFileId || typeof result.payloadFileId !== "string") {
+    throw new Error("The server returned an invalid Trash confirmation.");
+  }
+  return { metaFileId: result.metaFileId, payloadFileId: result.payloadFileId };
 }
 
 export async function updateMetaFile(

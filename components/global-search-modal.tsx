@@ -17,6 +17,7 @@ import { breadcrumbsToRelativePath } from "@/lib/drive-path";
 import type { ProgressiveMetaFile, BreadcrumbItem, DecryptedMeta } from "@/types";
 import { Search, FileX, Archive } from "lucide-react";
 import { useCrypto } from "@/hooks/use-crypto";
+import { useFileDelete } from "@/components/file-delete-provider";
 
 interface GlobalSearchModalProps {
   isOpen: boolean;
@@ -33,8 +34,10 @@ interface SearchableFile extends ProgressiveMetaFile {
 export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
   const queryClient = useQueryClient();
   const { isSelectionMode, isFileSelected, toggleFileSelection } = useSelection();
+  const { deletedMetaFileIds } = useFileDelete();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedDetail, setSelectedDetail] = useState<DecryptedMeta | null>(null);
+  const [previousDeletedMetaFileIds, setPreviousDeletedMetaFileIds] = useState(deletedMetaFileIds);
   const [, setMetadataRevision] = useState(0);
   const { registerSensitiveCleanup } = useCrypto();
 
@@ -44,6 +47,11 @@ export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
   }, []);
 
   useEffect(() => registerSensitiveCleanup(clearSensitiveState), [clearSensitiveState, registerSensitiveCleanup]);
+
+  if (previousDeletedMetaFileIds !== deletedMetaFileIds) {
+    setPreviousDeletedMetaFileIds(deletedMetaFileIds);
+    if (selectedDetail && deletedMetaFileIds.has(selectedDetail.driveFile.id)) setSelectedDetail(null);
+  }
 
   // 1. Gather all files from the React Query cache. This intentionally runs
   // on each render so metadataRevision reflects a successful save immediately.
@@ -68,7 +76,7 @@ export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
 
       data.forEach((file) => {
         // Only include decrypted files without errors
-        if (file.decrypted && file.details && !file.decryptError) {
+        if (!deletedMetaFileIds.has(file.driveFile.id) && file.decrypted && file.details && !file.decryptError) {
           filesList.push({
             ...file,
             folderId,

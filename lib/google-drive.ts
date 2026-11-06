@@ -68,7 +68,8 @@ async function listAll(
   accessToken: string,
   q: string,
   fields: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  supportsAllDrives = false
 ): Promise<DriveListResponse["files"]> {
   const all: DriveListResponse["files"] = [];
   let pageToken: string | undefined;
@@ -80,6 +81,10 @@ async function listAll(
       pageSize: "1000",
       orderBy: "name",
     };
+    if (supportsAllDrives) {
+      params.supportsAllDrives = "true";
+      params.includeItemsFromAllDrives = "true";
+    }
     if (pageToken) params.pageToken = pageToken;
 
     const res = await driveGet(accessToken, "/files", params, {}, signal);
@@ -800,6 +805,215 @@ export async function deleteUploadPair(
   await Promise.all([metaFileId, resolvedPayloadFileId].map(async (id) => {
     await deleteDriveFile(accessToken, id);
   }));
+}
+
+interface TrashPairFile {
+  id: string;
+  name: string;
+  parents?: string[];
+  mimeType?: string;
+  trashed: boolean;
+  modifiedTime?: string;
+  appProperties?: Record<string, string>;
+  capabilities?: { canTrash?: boolean };
+}
+
+const DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+const TRASH_PAIR_RETRY_MESSAGE = "Could not move both files to Trash. Retry; any files already moved can be restored from Google Drive Trash.";
+
+function safeTrashLookupError(error: unknown): DriveApiError {
+  if (error instanceof DriveApiError) {
+    const status = error.status === 401 || error.status === 403 || error.status === 404
+      ? error.status
+      : 502;
+    return new DriveApiError("Could not resolve the Drive file pair", status);
+  }
+  return new DriveApiError("Could not resolve the Drive file pair", 502);
+}
+
+async function getTrashPairFile(accessToken: string, fileId: string): Promise<TrashPairFile | null> {
+  const url = new URL(`${DRIVE_API}/files/${encodeURIComponent(fileId)}`);
+  url.searchParams.set("fields", "id,name,parents,mimeType,trashed,modifiedTime,appProperties,capabilities(canTrash)");
+  url.searchParams.set("supportsAllDrives", "true");
+  try {
+    const response = await fetch(url.toString(), {
+      headers: authHeaders(accessToken),
+      cache: "no-store",
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const status = response.status === 401 || response.status === 403 ? response.status : 502;
+      throw new DriveApiError("Could not inspect a Drive file", status);
+    }
+    const file = await response.json() as TrashPairFile;
+    if (
+      !file ||
+      file.id !== fileId ||
+      typeof file.name !== "string" ||
+      typeof file.mimeType !== "string" ||
+      typeof file.trashed !== "boolean"
+    ) {
+      throw new DriveApiError("Drive returned invalid file metadata", 502);
+    }
+    if (file.parents !== undefined && (!Array.isArray(file.parents) || file.parents.some((parent) => typeof parent !== "string"))) {
+      throw new DriveApiError("Drive returned invalid file metadata", 502);
+    }
+    return file;
+  } catch (error) {
+    if (error instanceof DriveApiError) throw error;
+    throw new DriveApiError("Could not inspect a Drive file", 502);
+  }
+}
+
+async function trashDriveFile(accessToken: string, fileId: string): Promise<void> {
+  const url = new URL(`${DRIVE_API}/files/${encodeURIComponent(fileId)}`);
+  url.searchParams.set("supportsAllDrives", "true");
+  url.searchParams.set("fields", "id,trashed");
+  let response: Response;
+  try {
+    response = await fetch(url.toString(), {
+      method: "PATCH",
+      headers: { ...authHeaders(accessToken), "Content-Type": "application/json" },
+      body: JSON.stringify({ trashed: true }),
+      cache: "no-store",
+    });
+  } catch {
+    throw new DriveApiError(TRASH_PAIR_RETRY_MESSAGE, 502);
+  }
+  if (!response.ok) throw new DriveApiError(TRASH_PAIR_RETRY_MESSAGE, 502);
+  try {
+    const updated = await response.json() as { id?: unknown; trashed?: unknown };
+    if (updated.id !== fileId || updated.trashed !== true) {
+      throw new DriveApiError(TRASH_PAIR_RETRY_MESSAGE, 502);
+    }
+  } catch (error) {
+    if (error instanceof DriveApiError) throw error;
+    throw new DriveApiError(TRASH_PAIR_RETRY_MESSAGE, 502);
+  }
+}
+
+export async function trashVaultFilePair(
+  accessToken: string,
+  metaFileId: string,
+  options: { expectedMetaName: string; expectedModifiedTime: string }
+): Promise<{ metaFileId: string; payloadFileId: string }> {
+  const { expectedMetaName, expectedModifiedTime } = options;
+  if (
+    typeof expectedMetaName !== "string" ||
+    expectedMetaName.length < 1 ||
+    expectedMetaName.length > 1024 ||
+    !expectedMetaName.endsWith(".meta") ||
+    typeof expectedModifiedTime !== "string" ||
+    expectedModifiedTime.length < 1 ||
+    expectedModifiedTime.length > 64 ||
+    !Number.isFinite(Date.parse(expectedModifiedTime))
+  ) {
+    throw new DriveApiError("Invalid file deletion request", 400);
+  }
+
+  const meta = await getTrashPairFile(accessToken, metaFileId);
+  if (!meta) throw new DriveApiError("Drive metadata file was not found", 404);
+  if (meta.mimeType === DRIVE_FOLDER_MIME_TYPE) {
+    throw new DriveApiError("Folders cannot be moved as file pairs", 400);
+  }
+  if (!meta.name.endsWith(".meta")) {
+    throw new DriveApiError("The requested file is not a metadata file", 400);
+  }
+  if (meta.name !== expectedMetaName) {
+    throw new DriveApiError("The metadata file changed; refresh and try again", 409);
+  }
+  if (!meta.parents?.[0]) throw new DriveApiError("The metadata file has no parent folder", 400);
+  if (!meta.trashed && meta.modifiedTime !== expectedModifiedTime) {
+    throw new DriveApiError("The metadata file changed; refresh and try again", 409);
+  }
+
+  const payloadName = meta.name.slice(0, -".meta".length);
+  const metaProperties = meta.appProperties ?? {};
+  const metaHasPayloadBinding = Object.prototype.hasOwnProperty.call(metaProperties, VAULTDRIVE_PAYLOAD_ID_PROPERTY);
+  let payload: TrashPairFile;
+
+  if (metaHasPayloadBinding) {
+    const boundPayloadId = metaProperties[VAULTDRIVE_PAYLOAD_ID_PROPERTY];
+    if (typeof boundPayloadId !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(boundPayloadId)) {
+      throw new DriveApiError("The metadata and payload binding is invalid", 409);
+    }
+    const bound = await getTrashPairFile(accessToken, boundPayloadId);
+    if (!bound) throw new DriveApiError("The paired payload was not found", 404);
+    if (bound.mimeType === DRIVE_FOLDER_MIME_TYPE) {
+      throw new DriveApiError("Folders cannot be moved as file pairs", 400);
+    }
+    if (
+      bound.name !== payloadName ||
+      !bound.parents?.includes(meta.parents[0]) ||
+      bound.appProperties?.[VAULTDRIVE_META_ID_PROPERTY] !== metaFileId
+    ) {
+      throw new DriveApiError("The metadata and payload do not match", 409);
+    }
+    payload = bound;
+  } else {
+    const query = `'${escapeDriveQueryValue(meta.parents[0])}' in parents and name = '${escapeDriveQueryValue(payloadName)}'`;
+    let listed: unknown;
+    try {
+      listed = await listAll(
+        accessToken,
+        query,
+        "id,name,parents,mimeType,trashed,appProperties,capabilities(canTrash)",
+        undefined,
+        true
+      );
+    } catch (error) {
+      throw safeTrashLookupError(error);
+    }
+    if (!Array.isArray(listed) || listed.some((candidate: unknown) => {
+      if (!candidate || typeof candidate !== "object") return true;
+      const file = candidate as Record<string, unknown>;
+      return typeof file.id !== "string" ||
+        typeof file.name !== "string" ||
+        typeof file.mimeType !== "string" ||
+        typeof file.trashed !== "boolean" ||
+        (file.parents !== undefined && (!Array.isArray(file.parents) || file.parents.some((parent) => typeof parent !== "string")));
+    })) {
+      throw new DriveApiError("Drive returned invalid file metadata", 502);
+    }
+    let candidates = listed as TrashPairFile[];
+    candidates = candidates.filter((candidate) => candidate.name === payloadName && candidate.parents?.includes(meta.parents![0]));
+    if (candidates.some((candidate) =>
+      Object.prototype.hasOwnProperty.call(candidate.appProperties ?? {}, VAULTDRIVE_META_ID_PROPERTY)
+    )) {
+      throw new DriveApiError("The metadata and payload do not match", 409);
+    }
+    if (candidates.some((candidate) => candidate.mimeType === DRIVE_FOLDER_MIME_TYPE)) {
+      throw new DriveApiError("Folders cannot be moved as file pairs", 400);
+    }
+    const liveCandidates = candidates.filter((candidate) => candidate.trashed === false);
+    const trashedCandidates = candidates.filter((candidate) => candidate.trashed === true);
+    if (meta.trashed) {
+      if (trashedCandidates.length === 0) throw new DriveApiError("The paired payload was not found", 404);
+      if (trashedCandidates.length !== 1) throw new DriveApiError("The paired payload is ambiguous", 409);
+      payload = trashedCandidates[0];
+    } else if (liveCandidates.length === 1) {
+      payload = liveCandidates[0];
+    } else if (liveCandidates.length > 1) {
+      throw new DriveApiError("The paired payload is ambiguous", 409);
+    } else if (trashedCandidates.length === 0) {
+      throw new DriveApiError("The paired payload was not found", 404);
+    } else if (trashedCandidates.length !== 1) {
+      throw new DriveApiError("The paired payload is ambiguous", 409);
+    } else {
+      payload = trashedCandidates[0];
+    }
+  }
+
+  if (!meta.trashed && meta.capabilities?.canTrash !== true) {
+    throw new DriveApiError("Google Drive does not allow this file to be moved to Trash", 403);
+  }
+  if (!payload.trashed && payload.capabilities?.canTrash !== true) {
+    throw new DriveApiError("Google Drive does not allow this file to be moved to Trash", 403);
+  }
+
+  if (!payload.trashed) await trashDriveFile(accessToken, payload.id);
+  if (!meta.trashed) await trashDriveFile(accessToken, meta.id);
+  return { metaFileId: meta.id, payloadFileId: payload.id };
 }
 
 async function resolvePayloadFile(

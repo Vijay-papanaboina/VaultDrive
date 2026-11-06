@@ -48,6 +48,7 @@ export function DriveHeader() {
     discardDownload,
     restartDownload,
     clearDownloadHistory,
+    downloadSettings,
   } = useFileDownload();
   const { uploadItems, resumeUpload, cancelUpload, clearUploadHistory } = useFileUpload();
 
@@ -323,7 +324,7 @@ export function DriveHeader() {
               <span className="flex flex-col gap-1">
                 <span className="text-sm font-medium">Download original files</span>
                 <span className="text-xs leading-relaxed text-muted-foreground">
-                  Fetch, decrypt, and save up to three files at a time.
+                  Fetch, decrypt, and save up to {downloadSettings.parallelDownloads} file{downloadSettings.parallelDownloads === 1 ? "" : "s"} at a time, with up to {downloadSettings.requestsPerDownload} range requests per file.
                 </span>
               </span>
             </button>
@@ -339,7 +340,7 @@ export function DriveHeader() {
               Downloads
             </DialogTitle>
             <DialogDescription className="text-muted-foreground text-xs">
-              Files stream from Drive, decrypt, and write to disk in chunks when your browser supports direct file access.
+              Up to {downloadSettings.parallelDownloads} files run at once, with {downloadSettings.requestsPerDownload} ordered range requests per file. Decrypted chunks go straight to disk when your browser supports direct file access.
             </DialogDescription>
           </DialogHeader>
 

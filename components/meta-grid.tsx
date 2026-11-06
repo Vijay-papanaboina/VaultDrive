@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MetaCard } from "@/components/meta-card";
 import { MetaDetailModal } from "@/components/meta-detail-modal";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -10,6 +10,7 @@ import type { ProgressiveMetaFile, DecryptedMeta } from "@/types";
 import { ChevronLeft, ChevronRight, FileX, KeyRound, RotateCcw } from "lucide-react";
 import { useSelection } from "@/components/selection-provider";
 import { revokeThumbnailUrls } from "@/lib/meta-decryption";
+import { useFileDelete } from "@/components/file-delete-provider";
 
 interface MetaGridProps {
   files: ProgressiveMetaFile[];
@@ -132,15 +133,42 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
   const savedOverridesRef = useRef<Record<string, ProgressiveMetaFile>>({});
   const { clearPassphrase, registerSensitiveCleanup } = useCrypto();
   const { isSelectionMode, isFileSelected, toggleFileSelection } = useSelection();
+  const { deletedMetaFileIds } = useFileDelete();
+
+  const visibleFiles = useMemo(
+    () => files.filter((file) => !deletedMetaFileIds.has(file.driveFile.id)),
+    [deletedMetaFileIds, files]
+  );
 
   const displayedFiles = useMemo(
-    () => files.map((file) => savedOverrides[file.driveFile.id] ?? file),
-    [files, savedOverrides]
+    () => visibleFiles.map((file) => savedOverrides[file.driveFile.id] ?? file),
+    [visibleFiles, savedOverrides]
   );
 
   useEffect(() => {
     savedOverridesRef.current = savedOverrides;
   }, [savedOverrides]);
+
+  useEffect(() => {
+    if (selected && deletedMetaFileIds.has(selected.driveFile.id)) {
+      startTransition(() => setSelected(null));
+    }
+    const next = { ...savedOverridesRef.current };
+    let changed = false;
+    const urlsToRevoke = new Set<string>();
+    for (const id of Object.keys(next)) {
+      if (!deletedMetaFileIds.has(id)) continue;
+      changed = true;
+      const thumbnailUrl = next[id].thumbnailUrl;
+      if (thumbnailUrl) urlsToRevoke.add(thumbnailUrl);
+      delete next[id];
+    }
+    if (changed) {
+      savedOverridesRef.current = next;
+      setSavedOverrides(next);
+    }
+    for (const url of urlsToRevoke) URL.revokeObjectURL(url);
+  }, [deletedMetaFileIds, selected]);
 
   const clearSensitiveState = useCallback(() => {
     revokeThumbnailUrls(Object.values(savedOverridesRef.current));
@@ -158,8 +186,7 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
     return `${displayedFiles.length}::${head}`;
   }, [displayedFiles]);
 
-  // Reset page during render when the file set changes (React's recommended pattern for
-  // adjusting state on prop change — avoids the extra render cycle of useEffect).
+  // Reset page during render when the file set changes, avoiding an extra effect render.
   // See: https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
   const [prevFilesKey, setPrevFilesKey] = useState(filesKey);
   if (prevFilesKey !== filesKey) {
@@ -307,20 +334,22 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
         meta={selected}
         onClose={() => setSelected(null)}
         onSaved={(next) => {
-          setSavedOverrides((previous) => ({
-            ...previous,
+          const updated = {
+            ...savedOverridesRef.current,
             [next.driveFile.id]: {
               driveFile: next.driveFile,
               originalFileName: next.originalFileName,
               decrypted: true,
-              status: "decrypted",
+              status: "decrypted" as const,
               details: next.details,
               thumbnailBytes: next.thumbnailBytes,
               thumbnailFilename: next.thumbnailFilename,
               thumbnailMimeType: next.thumbnailMimeType,
               thumbnailUrl: next.thumbnailUrl,
             },
-          }));
+          };
+          savedOverridesRef.current = updated;
+          setSavedOverrides(updated);
           setSelected(next);
         }}
       />
