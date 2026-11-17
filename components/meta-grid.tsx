@@ -212,6 +212,8 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
       toggleFileSelection({
         id: fileId,
         metaFileId: file.driveFile.id,
+        driveFile: file.driveFile,
+        displayName: file.details?.name || file.originalFileName,
         name: file.originalFileName,
         relativePath: resolvedPath,
         expectedSize:
@@ -307,18 +309,15 @@ export function MetaGrid({ files, isLoading, error, relativePath, getRelativePat
   return (
     <>
       <div ref={gridRef} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {pagedFiles.map((meta) => {
-          const fileId = meta.driveFile.name.replace(".meta", "");
-          return (
+        {pagedFiles.map((meta) => (
             <MetaCard
               key={meta.driveFile.id}
               meta={meta}
               isSelectionMode={isSelectionMode}
-              isSelected={isFileSelected(fileId)}
+              isSelected={isFileSelected(meta.driveFile.id)}
               onClick={() => handleCardClick(meta)}
             />
-          );
-        })}
+        ))}
       </div>
 
       <PaginationControls

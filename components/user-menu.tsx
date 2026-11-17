@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { signOut, useSession } from "@/lib/auth-client";
 import { useCrypto } from "@/hooks/use-crypto";
@@ -18,6 +18,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { KeyRound, Copy, Check, Eye, EyeOff, LogOut, Shield, SlidersHorizontal } from "lucide-react";
 import { useMediaPreview } from "@/components/media-preview-provider";
 import { DownloadSettingsDialog } from "@/components/download-settings-dialog";
+import { useLocalDownloadActions } from "@/components/local-download-provider";
 
 interface AgeKeysDialogProps {
   isOpen: boolean;
@@ -134,16 +135,18 @@ function AgeKeysDialog({ isOpen, onClose, identity }: AgeKeysDialogProps) {
 }
 
 export function UserMenu() {
+  const { openSettings } = useLocalDownloadActions();
   const router = useRouter();
   const { data: session } = useSession();
   const { getPassphrase } = useCrypto();
   const { encryptedPreviewDiskCacheEnabled, setEncryptedPreviewDiskCacheEnabled } = useMediaPreview();
+  const mounted = useSyncExternalStore(() => () => {}, () => true, () => false);
   const [isKeysOpen, setIsKeysOpen] = useState(false);
   const [isDownloadSettingsOpen, setIsDownloadSettingsOpen] = useState(false);
   const user = session?.user;
   const identity = getPassphrase();
 
-  if (!user) return null;
+  if (!mounted || !user) return null;
 
   const initials = user.name
     ? user.name.split(" ").map((n) => n[0]).join("").toUpperCase().slice(0, 2)
@@ -191,6 +194,10 @@ export function UserMenu() {
           >
             <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
             Download settings
+          </DropdownMenuItem>
+          <DropdownMenuItem className="gap-2 cursor-pointer" onClick={openSettings}>
+            <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
+            Encrypted Downloads settings
           </DropdownMenuItem>
           {identity && (
             <>

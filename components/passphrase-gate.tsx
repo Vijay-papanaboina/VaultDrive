@@ -14,11 +14,11 @@ import { Button } from "@/components/ui/button";
 import { Eye, EyeOff, KeyRound, Loader2, ShieldAlert } from "lucide-react";
 
 /**
- * Global passphrase gate — shown immediately on /drive entry (login or refresh).
+ * Global passphrase gate, shown on Drive and local Downloads.
  * No test file needed: passphrase is stored and any wrong-key errors
  * surface naturally per-card when decryption fails.
  */
-export function PassphraseGate({ children }: { children: React.ReactNode }) {
+export function PassphraseGate({ children, offlineUnlock = false }: { children: React.ReactNode; offlineUnlock?: boolean }) {
   const {
     hasPassphrase,
     setPassphrase,
@@ -32,6 +32,7 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
   const [value, setValue] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
   const submitGenerationRef = useRef(0);
   const pendingSubmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -49,6 +50,7 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
     setValue("");
     setShowPw(false);
     setLoading(false);
+    setUnlockError(null);
   }, [invalidatePendingSubmit]);
 
   useEffect(() => {
@@ -65,16 +67,19 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
     if (!passphrase) return;
     invalidatePendingSubmit(true);
     const submitGeneration = submitGenerationRef.current;
+    setUnlockError(null);
     setLoading(true);
     // Small delay so the spinner renders before derivation blocks
     pendingSubmitTimerRef.current = setTimeout(async () => {
       pendingSubmitTimerRef.current = null;
       if (submitGeneration !== submitGenerationRef.current) return;
       try {
-        await setPassphrase(passphrase);
+        await setPassphrase(passphrase, offlineUnlock);
         if (submitGeneration === submitGenerationRef.current) setValue("");
       } catch (err) {
-        if (submitGeneration === submitGenerationRef.current) console.error(err);
+        if (submitGeneration === submitGenerationRef.current) {
+          setUnlockError(err instanceof Error ? err.message : "Could not unlock your vault.");
+        }
       } finally {
         if (submitGeneration === submitGenerationRef.current) setLoading(false);
       }
@@ -114,7 +119,7 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
             <DialogDescription className="text-muted-foreground text-xs leading-normal">
               {hasPassphrase
                 ? "Enter your new age passphrase. This will reset browser memory and start decrypting with the new key."
-                : "Your age passphrase is required to decrypt .meta files. It stays in browser memory only — never sent anywhere."}
+                : "Enter your vault password to decrypt metadata. The password is never sent anywhere."}
             </DialogDescription>
           </DialogHeader>
 
@@ -127,6 +132,7 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
                 value={value}
                 onChange={(e) => {
                   setValue(e.target.value);
+                  setUnlockError(null);
                   if (passphraseError) clearPassphraseError();
                 }}
                 autoFocus
@@ -148,10 +154,10 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
               </button>
             </div>
 
-            {passphraseError && (
+            {(passphraseError || unlockError) && (
               <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3.5 py-2.5 text-sm text-destructive">
                 <ShieldAlert className="mt-0.5 h-4.5 w-4.5 shrink-0" />
-                {passphraseError}
+                {passphraseError || unlockError}
               </div>
             )}
 
@@ -185,7 +191,7 @@ export function PassphraseGate({ children }: { children: React.ReactNode }) {
             </div>
 
             <p className="text-center text-xs text-muted-foreground">
-              Stored in memory only. Cleared on tab close or refresh.
+              The derived key is never saved. When using VLC, the paired helper receives it only for playback.
             </p>
           </form>
         </DialogContent>

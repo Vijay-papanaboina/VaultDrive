@@ -2,7 +2,7 @@
 
 A secure, client-side encryption frontend for Google Drive. This project provides a Google Drive-like web interface where your files are stored on Google Drive, but their metadata and contents are fully end-to-end encrypted using `age-encryption`.
 
-All sensitive cryptographic operations, including passphrase-derived key creation and data decryption, occur strictly client-side in the browser. Original encrypted payload downloads and resumable upload data move directly between the browser and Google Drive. The Next.js backend handles authentication, small control requests, and bounded metadata operations. It never sees your unencrypted data or encryption key.
+The browser derives the key and decrypts standard downloads, metadata, and previews. Optional offline VLC playback decrypts ranges on your computer using a paired local helper. The Next.js backend never sees your password, key, or plaintext. Original encrypted payloads and resumable uploads move directly between the browser and Drive.
 
 ## Core Features
 
@@ -19,9 +19,10 @@ All sensitive cryptographic operations, including passphrase-derived key creatio
   - File grids utilize a paginated layout (32 items per page) with responsive pagination controls to avoid DOM overload and ensure rapid rendering.
 - **Rclone Selection & Export**: Select specific files to export an ID list and fetch your raw encrypted data from Google Drive using Rclone command-line utilities.
 - **Browser Downloads**: From the selection toolbar, choose between exporting `files.txt` or fetching encrypted payloads directly from Google Drive, decrypting, and saving the selected originals in the browser. Individual and selected-file downloads share configurable limits, defaulting to three active files and four ordered range requests per file, with per-file pause and resume controls. Paused files retain their progress and free a slot for waiting downloads. Recoverable read interruptions can Continue from the committed offset; write or integrity failures require discard and restart. A short-lived, read-only Google token is held only in the download source's memory.
+- **Encrypted Downloads & VLC**: Save the original ciphertext and `.meta` to a persistent local library. Play downloaded videos offline in VLC, starting at any entry without losing the rest of the playlist. See [local helper setup](./docs/offline-downloads.md).
 - **Streaming Media Preview**: MP4 previews fetch encrypted ranges directly from Google Drive and decrypt authenticated age records into MP4Box/MSE. Optional disk caching stores encrypted MP4 ranges; the normal MP4 path does not write plaintext to disk. Native/fallback formats use a direct encrypted stream and temporary plaintext browser storage where needed. Unsupported formats fall back to Download.
 - **Direct Encrypted Uploads**: Original payload and `.meta` ciphertext are uploaded directly to Google Drive resumable sessions. The browser sends no write bearer token; the server creates sessions and verifies metadata completion through small JSON control requests. Retry sessions live only in memory and are cleared by reload, reopening, or vault lock.
-- **Encrypted Metadata Editing**: Edit the fields stored in `details.json` and replace or remove the thumbnail from a decrypted card, then re-zip, re-encrypt, and update the same `.meta` file in Google Drive. Original payload files and Drive filenames are never changed. A separate confirmed delete moves the verified pair to Google Drive Trash; clearing transfer history is not deletion.
+- **Encrypted Metadata Editing**: Edit the fields stored in `details.json` or the thumbnail. A separate confirmed Trash action moves the verified pair to Google Drive Trash, including from a multi-selection. Local encrypted copies are unaffected.
 - **Modern UI/UX**: Built with Tailwind CSS v4 and Base UI, featuring custom scrollbars, micro-animations, and a highly polished dark mode.
 
 ## Tech Stack
@@ -42,6 +43,7 @@ For an in-depth look at how the system maintains zero-knowledge privacy while in
 1. [Architecture & Decryption Flow](./docs/architecture.md) - Learn about session setup, direct encrypted data transfers, client-side decryption, the shared browser shell, and recursive search.
 2. [Routes & Components](./docs/routes.md) - Understand the Next.js API endpoints, shared view components, and page-specific wiring.
 3. [CLI Tools & Selection Export](./docs/tools.md) - Details on browser downloads, Rclone export, folder-flattening, and the local Node.js decryption/packaging script tools.
+4. [Encrypted Downloads & VLC](./docs/offline-downloads.md) - Build, install, and pair the Linux helper.
 
 ## Getting Started
 

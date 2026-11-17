@@ -31,6 +31,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { FileDownloadButton } from "@/components/file-download-button";
+import { EncryptedDownloadButton } from "@/components/encrypted-download-button";
 import { FileDeleteButton } from "@/components/file-delete-button";
 import { MediaPreviewButton } from "@/components/media-preview-button";
 import { inferMimeType } from "@/lib/crypto";
@@ -374,6 +375,7 @@ function MetaDetailContent({
                 showLabel
                 className="flex-1 justify-center border-emerald-500/25 bg-emerald-600/15 text-emerald-200 hover:border-emerald-400/60 hover:bg-emerald-600/30"
               />
+              <EncryptedDownloadButton target={{ metaFileId: driveFile.id, name: details.name || originalFileName }} showLabel />
               <Button
                 id="meta-modal-edit"
                 variant="outline"

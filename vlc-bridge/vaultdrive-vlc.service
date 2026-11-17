@@ -1,0 +1,11 @@
+[Unit]
+Description=VaultDrive encrypted Downloads and VLC bridge
+
+[Service]
+ExecStart=%h/.local/bin/vaultdrive-vlc serve
+Restart=on-failure
+RestartSec=2
+UMask=0077
+
+[Install]
+WantedBy=default.target

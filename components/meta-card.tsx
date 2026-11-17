@@ -1,12 +1,13 @@
 "use client";
 
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FileDownloadButton } from "@/components/file-download-button";
 import { FileDeleteButton } from "@/components/file-delete-button";
 import { MediaPreviewButton } from "@/components/media-preview-button";
+import { EncryptedDownloadButton } from "@/components/encrypted-download-button";
 import { inferMimeType } from "@/lib/crypto";
 import type { ProgressiveMetaFile } from "@/types";
 import {
@@ -23,6 +24,7 @@ interface MetaCardProps {
   onClick: () => void;
   isSelectionMode?: boolean;
   isSelected?: boolean;
+  local?: { footer: ReactNode };
 }
 
 function formatBytes(bytes: number): string {
@@ -51,6 +53,7 @@ export const MetaCard = memo(
     onClick,
     isSelectionMode = false,
     isSelected = false,
+    local,
   }: MetaCardProps) {
     const {
       driveFile,
@@ -106,7 +109,7 @@ export const MetaCard = memo(
             </div>
           )}
 
-          {(decrypted && !decryptError) || meta.status === "error" ? (
+          {!local && ((decrypted && !decryptError) || meta.status === "error") ? (
             <div className="absolute right-2.5 top-2.5 z-10 flex gap-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
               {decrypted && !decryptError && (
                 <>
@@ -122,6 +125,7 @@ export const MetaCard = memo(
                     }}
                     className=""
                   />
+                  <EncryptedDownloadButton target={{ metaFileId: driveFile.id, name: details?.name || originalFileName }} />
                 </>
               )}
               <FileDeleteButton
@@ -187,7 +191,7 @@ export const MetaCard = memo(
             }
           >
             {originalFileName}
-            {details?.name && (
+            {details?.name && (!local || details.name !== originalFileName) && (
               <span className="text-muted-foreground ml-1.5">
                 {details.name}
               </span>
@@ -273,6 +277,7 @@ export const MetaCard = memo(
               );
             })()
           ) : null}
+          {local?.footer}
         </div>
       </Card>
     );
@@ -281,6 +286,7 @@ export const MetaCard = memo(
     return (
       prevProps.isSelectionMode === nextProps.isSelectionMode &&
       prevProps.isSelected === nextProps.isSelected &&
+      prevProps.local === nextProps.local &&
       prevProps.meta === nextProps.meta
     );
   },

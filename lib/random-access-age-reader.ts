@@ -5,7 +5,7 @@ import { chacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import type { EncryptedPreviewCache } from "@/lib/encrypted-preview-cache";
-import { createDirectPayloadSource, PayloadTransportError } from "@/lib/direct-payload-source";
+import { createDirectPayloadSource, PayloadTransportError, type DirectPayloadSource } from "@/lib/direct-payload-source";
 
 export const AGE_PLAINTEXT_RECORD_BYTES = 64 * 1024;
 export const AGE_CIPHERTEXT_RECORD_BYTES = AGE_PLAINTEXT_RECORD_BYTES + 16;
@@ -38,6 +38,7 @@ type OpenReaderOptions = {
   requestSignal?: AbortSignal;
   fetchImpl?: typeof fetch;
   encryptedCache?: EncryptedPreviewCache | null;
+  source?: DirectPayloadSource;
 };
 
 function asError(error: unknown, fallback: string) {
@@ -324,10 +325,10 @@ class AgePayloadReader implements RandomAccessAgeReader {
   }
 }
 
-export async function openRandomAccessAgeReader({ identity, metaFileId, signal, requestSignal, fetchImpl = fetch, encryptedCache = null }: OpenReaderOptions): Promise<RandomAccessAgeReader> {
+export async function openRandomAccessAgeReader({ identity, metaFileId, signal, requestSignal, fetchImpl = fetch, encryptedCache = null, source }: OpenReaderOptions): Promise<RandomAccessAgeReader> {
   if (signal?.aborted || requestSignal?.aborted) throw abortError();
   const bootstrapSignal = requestSignal ?? signal;
-  const payloadSource = createDirectPayloadSource(metaFileId, { signal, fetchImpl });
+  const payloadSource = source ?? createDirectPayloadSource(metaFileId, { signal, fetchImpl });
   let encryptedPayloadSize: number | null = null;
   const fetchNetworkRange = async (start: number, end: number, requestSignal?: AbortSignal): Promise<EncryptedRange> => {
     let response: Response;

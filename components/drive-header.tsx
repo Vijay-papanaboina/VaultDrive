@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Shield, Lock, CheckSquare, Download, Clipboard, Check, Trash2, Search, KeyRound, Files, List, Loader2, AlertCircle, Upload, RotateCcw, Pause, Play, Clock3 } from "lucide-react";
+import { Shield, Lock, CheckSquare, Download, Clipboard, Check, Trash2, Search, KeyRound, Files, List, Loader2, AlertCircle, Upload, RotateCcw, Pause, Play, Clock3, HardDriveDownload } from "lucide-react";
+import { useFileDelete } from "@/components/file-delete-provider";
+import { useLocalDownloadActions, useLocalDownloads } from "@/components/local-download-provider";
 import { UserMenu } from "@/components/user-menu";
 import { useSelection } from "@/components/selection-provider";
 import { useCrypto } from "@/hooks/use-crypto";
@@ -29,7 +31,23 @@ function formatDownloadBytes(bytes: number): string {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
 }
 
+function LocalDownloadsLink() {
+  const { transfers } = useLocalDownloads();
+  const running = Object.values(transfers).filter((transfer) => transfer.stage !== "failed").length;
+  const failed = Object.values(transfers).some((transfer) => transfer.stage === "failed");
+  return (
+    <Link href="/downloads" prefetch={false} className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium text-muted-foreground hover:bg-white/8 hover:text-foreground">
+      <HardDriveDownload className="h-3.5 w-3.5" />
+      Downloads
+      {running > 0 && <span className="rounded-full bg-violet-500/20 px-1.5 py-0.5 text-[10px] text-violet-200" title="Active encrypted downloads">{running}</span>}
+      {failed && <AlertCircle className="size-3.5 text-amber-300" aria-label="An encrypted download needs attention" />}
+    </Link>
+  );
+}
+
 export function DriveHeader() {
+  const { requestDeleteMany } = useFileDelete();
+  const { enqueue } = useLocalDownloadActions();
   const {
     isSelectionMode,
     toggleSelectionMode,
@@ -167,7 +185,7 @@ export function DriveHeader() {
   return (
     <>
       <header className="sticky top-0 z-40 border-b border-white/8 bg-background/80 backdrop-blur-xl">
-        <div className="mx-auto flex h-14 max-w-7xl items-center gap-4 px-4 sm:px-6">
+        <div className="mx-auto flex min-h-14 max-w-7xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2 sm:px-6">
           {/* Logo / brand */}
           <Link href="/drive" className="cursor-pointer flex items-center gap-2 font-semibold text-foreground">
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-600/20 border border-violet-500/30">
@@ -175,10 +193,11 @@ export function DriveHeader() {
             </div>
             <span>VaultDrive</span>
           </Link>
+          <LocalDownloadsLink />
 
-          <div className="flex flex-1 items-center justify-end gap-3">
+          <div className="flex flex-1 flex-wrap items-center justify-end gap-3">
             {/* Global Selection Mode controls */}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {hasPassphrase && (
                 <button
                   onClick={() => setIsGateOpen(true)}
@@ -217,9 +236,18 @@ export function DriveHeader() {
                   </button>
 
                   <button
+                    type="button"
+                    onClick={() => requestDeleteMany(selectedFiles.map(({ driveFile, displayName }) => ({ driveFile, displayName })))}
+                    className="flex items-center gap-1.5 rounded-lg border border-red-500/25 bg-red-500/10 px-2.5 py-1.5 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/20 cursor-pointer"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    <span>Trash selected</span>
+                  </button>
+
+                  <button
                     onClick={clearSelection}
                     className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-red-500/10 hover:text-red-400 transition-all cursor-pointer"
-                    title="Clear all selections"
+                    title="Clear all selections without deleting files"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                     <span>Clear All</span>
@@ -239,8 +267,8 @@ export function DriveHeader() {
                   )}
                   <span>
                     {batch?.active
-                      ? `Downloads ${batch.completed}/${batch.total}`
-                      : `Downloads (${downloadList.length})`}
+                      ? `Transfers ${batch.completed}/${batch.total}`
+                      : `Transfers (${downloadList.length})`}
                   </span>
                 </button>
               )}
@@ -292,7 +320,7 @@ export function DriveHeader() {
               Download selected files
             </DialogTitle>
             <DialogDescription className="text-muted-foreground text-xs">
-              Choose whether to export the encrypted file list or decrypt and save the original files in your browser.
+              Save the originals, keep encrypted copies for offline playback, or export the file list.
             </DialogDescription>
           </DialogHeader>
 
@@ -307,6 +335,22 @@ export function DriveHeader() {
                 <span className="text-sm font-medium">Download file list</span>
                 <span className="text-xs leading-relaxed text-muted-foreground">
                   Save files.txt for rclone and local CLI decryption.
+                </span>
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIsDownloadChoiceOpen(false);
+                enqueue(selectedFiles.map(({ metaFileId, displayName }) => ({ metaFileId, name: displayName })));
+              }}
+              className="flex items-start gap-3 rounded-xl border border-white/10 bg-white/5 p-4 text-left transition-colors hover:border-violet-400/40 hover:bg-violet-500/10"
+            >
+              <HardDriveDownload className="mt-0.5 h-5 w-5 shrink-0 text-violet-300" />
+              <span className="flex flex-col gap-1">
+                <span className="text-sm font-medium">Download encrypted</span>
+                <span className="text-xs leading-relaxed text-muted-foreground">
+                  Keep ciphertext and metadata in your local Downloads library.
                 </span>
               </span>
             </button>
@@ -337,7 +381,7 @@ export function DriveHeader() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-lg font-semibold">
               <Download className="h-5 w-5 text-emerald-400" />
-              Downloads
+              Browser download transfers
             </DialogTitle>
             <DialogDescription className="text-muted-foreground text-xs">
               Up to {downloadSettings.parallelDownloads} files run at once, with {downloadSettings.requestsPerDownload} ordered range requests per file. Decrypted chunks go straight to disk when your browser supports direct file access.

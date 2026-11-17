@@ -1,6 +1,6 @@
 # Architecture & Decryption Flow
 
-The Encrypted GDrive project acts as a secure, zero-knowledge overlay on top of Google Drive. Cryptography stays in the browser. The Next.js backend handles authentication, metadata operations, and small session-control requests, while original encrypted payload bytes move directly between the browser and Google Drive.
+The Encrypted GDrive project acts as a zero-knowledge overlay on top of Google Drive. Cryptography stays on the user's device, in the browser or in the optional VLC helper. The Next.js backend handles authentication, metadata operations, and small session-control requests, while original encrypted payload bytes move directly between the browser and Google Drive.
 
 ## High-Level Architecture
 
@@ -20,6 +20,7 @@ The current frontend separates page-specific data discovery from shared file-bro
 6. **Metadata Edit Pipeline**: `MetaDetailModal` edits the in-memory `details.json` object and thumbnail bytes, `lib/crypto.ts` creates a new ZIP and age ciphertext in the browser, and `PUT /api/drive/meta/[fileId]` replaces only the existing `.meta` file content through the authenticated Drive API.
 7. **Upload Pipeline**: `UploadModal` asks the server to allocate an empty opaque `.meta` file and a Drive resumable session. The browser uploads encrypted metadata directly, then asks the server to verify its exact size before creating a payload session. The original is read from `File.slice()` in bounded chunks, given the CLI filename header, age-encrypted locally, and uploaded directly to Drive. The browser sends no write bearer token. Drive sees only opaque numeric `<id>.meta` and `<id>` names. Upload sessions and their sealed age context exist only in provider memory, so reload, reopen, or vault lock ends the ability to resume; clearing history does not delete Drive files.
 8. **Media Preview Pipeline**: MP4 previews request a session and fetch encrypted ranges directly from Google Drive. The random-access age reader decrypts authenticated records in memory for MP4Box/MSE; optional disk caching stores encrypted ranges only. Native/fallback formats fetch a direct encrypted stream and use temporary plaintext browser storage where needed. The existing playback loops, seek, and preload behavior remain unchanged.
+9. **Encrypted Local Library**: The browser writes ciphertext straight to a user-selected folder and verifies Drive checksums. IndexedDB remembers the folder handle. The authenticated loopback helper opens completed files read-only for VLC and is not involved in downloads or browsing. See [setup and storage details](./offline-downloads.md).
 
 ## Data Flow: Google OAuth to Decryption
 

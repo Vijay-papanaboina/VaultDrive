@@ -12,12 +12,14 @@ import { deriveAgeIdentity } from "@/lib/crypto";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSession } from "@/lib/auth-client";
 import type { ProgressiveMetaFile } from "@/types";
+import { readLocalUnlockEmail } from "@/lib/local-download-library";
 
 interface CryptoContextValue {
   hasPassphrase: boolean;
   keyVersion: number;
   getPassphrase: () => string | null;
-  setPassphrase: (pw: string) => Promise<void>;
+  authenticatedEmail: string | undefined;
+  setPassphrase: (pw: string, offlineUnlock?: boolean) => Promise<void>;
   cancelPassphraseOperation: () => void;
   clearPassphrase: (errorMsg?: string) => void;
   passphraseError: string | null;
@@ -34,7 +36,7 @@ const CryptoContext = createContext<CryptoContextValue | null>(null);
 
 export function CryptoProvider({ children }: { children: ReactNode }) {
   const { data: session } = useSession();
-  // useRef keeps the derived private identity key in memory only — never written to storage
+  // The derived private identity stays in memory, never in browser storage.
   const identityRef = useRef<string | null>(null);
   const passphraseOperationRef = useRef(0);
   // useState for reactivity (so UI re-renders when passphrase is set/cleared)
@@ -66,11 +68,13 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
     return identityRef.current;
   }
 
-  async function setPassphrase(pw: string) {
+  async function setPassphrase(pw: string, offlineUnlock = false) {
     const operation = ++passphraseOperationRef.current;
-    const email = session?.user?.email;
+    const email = session?.user?.email || (offlineUnlock ? readLocalUnlockEmail() : null);
     if (!email) {
-      throw new Error("Cannot set passphrase without an authenticated user email session.");
+      throw new Error(offlineUnlock
+        ? "Sign in and open your download folder once while online to set up offline unlock."
+        : "Cannot set passphrase without an authenticated user email session.");
     }
     const identity = await deriveAgeIdentity(pw, email);
     if (operation !== passphraseOperationRef.current) {
@@ -125,6 +129,7 @@ export function CryptoProvider({ children }: { children: ReactNode }) {
         hasPassphrase,
         keyVersion,
         getPassphrase,
+        authenticatedEmail: session?.user?.email,
         setPassphrase,
         cancelPassphraseOperation,
         clearPassphrase,

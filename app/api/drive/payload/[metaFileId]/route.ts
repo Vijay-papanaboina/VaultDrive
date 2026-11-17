@@ -64,11 +64,13 @@ export async function POST(
       return errorResponse("Invalid download request.", 400);
     }
 
+    const offline = new URL(request.url).searchParams.get("offline") === "1";
     const token = await issueReadOnlyDriveToken(session.user.id, request.signal);
     const downloadSession = await createPayloadDownloadSession(
       token.accessToken,
       metaFileId,
-      request.signal
+      request.signal,
+      offline
     );
 
     return NextResponse.json({

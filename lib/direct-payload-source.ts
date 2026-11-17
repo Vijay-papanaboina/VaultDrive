@@ -1,5 +1,11 @@
 "use client";
 
+import {
+  isEncryptedDownloadPair,
+  sameEncryptedDownloadPair,
+  type EncryptedDownloadPair,
+} from "./local-download-types";
+
 const READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 const META_FILE_ID = /^[A-Za-z0-9_-]{1,256}$/;
 const PAYLOAD_FILE_ID = /^[A-Za-z0-9_-]{1,256}$/;
@@ -22,6 +28,8 @@ export interface DirectPayloadSession {
   accessToken: string;
   scope: string;
   expiresAt: number;
+  offline?: EncryptedDownloadPair;
+  metaResourceKey?: string;
 }
 
 export interface DirectPayloadSourceOptions {
@@ -32,6 +40,19 @@ export interface DirectPayloadSourceOptions {
 export interface DirectPayloadSource {
   fetch(range?: DirectPayloadRange, signal?: AbortSignal): Promise<Response>;
   close(): void;
+}
+
+export interface EncryptedPayloadSource {
+  pair(signal?: AbortSignal): Promise<EncryptedDownloadPair>;
+  fetchPart(part: "meta" | "payload", offset: number, signal?: AbortSignal): Promise<Response>;
+  close(): void;
+}
+
+export class RemoteDownloadMissingError extends Error {
+  constructor() {
+    super("The encrypted pair is no longer available on Google Drive.");
+    this.name = "RemoteDownloadMissingError";
+  }
 }
 
 export class PayloadTransportError extends Error {
@@ -112,7 +133,7 @@ function validateDownloadUri(value: unknown, payloadFileId: string): string {
   return uri.toString();
 }
 
-function parseSession(value: unknown): DirectPayloadSession {
+function parseSession(value: unknown, offlineMetaId?: string): DirectPayloadSession {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("The direct download session is invalid.");
   }
@@ -127,6 +148,10 @@ function parseSession(value: unknown): DirectPayloadSession {
     "scope",
     "expiresAt",
   ]);
+  if (offlineMetaId) {
+    allowedKeys.add("offline");
+    allowedKeys.add("metaResourceKey");
+  }
   const keys = Object.keys(session);
   if (keys.some((key) => !allowedKeys.has(key))) {
     throw new Error("The direct download session is invalid.");
@@ -155,20 +180,27 @@ function parseSession(value: unknown): DirectPayloadSession {
     throw new Error("The direct download session is invalid.");
   }
 
-  if (
-    session.resourceKey !== undefined &&
-    (typeof session.resourceKey !== "string" ||
-      session.resourceKey.length === 0 ||
-      session.resourceKey.length > MAX_RESOURCE_KEY_LENGTH ||
-      /[\u0000-\u001f\u007f]/.test(session.resourceKey))
-  ) {
+  const validKey = (value: unknown): value is string =>
+    typeof value === "string" && value.length > 0 && value.length <= MAX_RESOURCE_KEY_LENGTH &&
+    !/[\u0000-\u001f\u007f]/.test(value);
+  if (session.resourceKey !== undefined && !validKey(session.resourceKey)) {
     throw new Error("The direct download session is invalid.");
+  }
+  if (session.metaResourceKey !== undefined && !validKey(session.metaResourceKey)) {
+    throw new Error("The direct metadata download is invalid.");
   }
 
   if (typeof session.downloadUri !== "string") {
     throw new Error("The direct download session is invalid.");
   }
 
+  const pair = session.offline;
+  if (offlineMetaId &&
+    (!isEncryptedDownloadPair(pair) || pair.meta.id !== offlineMetaId ||
+      pair.payload.id !== payloadFileId || pair.payload.size !== encryptedSize)
+  ) {
+    throw new Error("Google Drive did not provide a verifiable encrypted file pair.");
+  }
   return {
     downloadUri: validateDownloadUri(session.downloadUri, payloadFileId),
     partialDownloadAllowed: session.partialDownloadAllowed,
@@ -178,6 +210,8 @@ function parseSession(value: unknown): DirectPayloadSession {
     accessToken,
     scope: READONLY_SCOPE,
     expiresAt,
+    ...(isEncryptedDownloadPair(pair) ? { offline: pair } : {}),
+    ...(validKey(session.metaResourceKey) ? { metaResourceKey: session.metaResourceKey } : {}),
   };
 }
 
@@ -253,10 +287,11 @@ function googleResponseError(status: number): Error {
   return new Error(`Google Drive download failed (HTTP ${status}).`);
 }
 
-export function createDirectPayloadSource(
+function openPayloadSource(
   metaFileId: string,
-  { signal: parentSignal, fetchImpl = fetch }: DirectPayloadSourceOptions = {}
-): DirectPayloadSource {
+  { signal: parentSignal, fetchImpl = fetch }: DirectPayloadSourceOptions,
+  offline: boolean
+): DirectPayloadSource & EncryptedPayloadSource {
   if (!META_FILE_ID.test(metaFileId)) {
     throw new Error("The requested payload is invalid.");
   }
@@ -270,12 +305,14 @@ export function createDirectPayloadSource(
   let pendingSession: Promise<DirectPayloadSession> | null = null;
   let pinnedPayloadFileId: string | null = null;
   let pinnedEncryptedSize: number | null = null;
+  let pinnedPair: EncryptedDownloadPair | null = null;
 
   const clear = () => {
     session = null;
     pendingSession = null;
     pinnedPayloadFileId = null;
     pinnedEncryptedSize = null;
+    pinnedPair = null;
   };
 
   const close = () => {
@@ -297,7 +334,7 @@ export function createDirectPayloadSource(
     const pending = (async () => {
       let response: Response;
       try {
-        response = await fetchImpl(`/api/drive/payload/${encodeURIComponent(metaFileId)}`, {
+        response = await fetchImpl(`/api/drive/payload/${encodeURIComponent(metaFileId)}${offline ? "?offline=1" : ""}`, {
           method: "POST",
           credentials: "same-origin",
           cache: "no-store",
@@ -313,6 +350,7 @@ export function createDirectPayloadSource(
       }
       if (!response.ok) {
         await discardBody(response);
+        if (offline && response.status === 404) throw new RemoteDownloadMissingError();
         throw sessionError(response.status);
       }
 
@@ -323,17 +361,19 @@ export function createDirectPayloadSource(
         if (closed || lifetimeSignal.aborted) throw abortError();
         throw new Error("The direct download session response is invalid.");
       }
-      const nextSession = parseSession(body);
+      const nextSession = parseSession(body, offline ? metaFileId : undefined);
       if (closed || lifetimeSignal.aborted) throw abortError();
       if (
         (pinnedPayloadFileId !== null && nextSession.payloadFileId !== pinnedPayloadFileId) ||
-        (pinnedEncryptedSize !== null && nextSession.encryptedSize !== pinnedEncryptedSize)
+        (pinnedEncryptedSize !== null && nextSession.encryptedSize !== pinnedEncryptedSize) ||
+        (pinnedPair !== null && (!nextSession.offline || !sameEncryptedDownloadPair(pinnedPair, nextSession.offline)))
       ) {
         throw new Error("The encrypted payload changed while downloading. Start the download again.");
       }
 
       pinnedPayloadFileId ??= nextSession.payloadFileId;
       pinnedEncryptedSize ??= nextSession.encryptedSize;
+      pinnedPair ??= nextSession.offline ?? null;
       session = nextSession;
       return nextSession;
     })();
@@ -413,13 +453,17 @@ export function createDirectPayloadSource(
 
   const fetchPayload = async (
     requestedRange?: DirectPayloadRange,
-    callerSignal?: AbortSignal
+    callerSignal?: AbortSignal,
+    fromOffset = 0
   ): Promise<Response> => {
-    const range = validateRange(requestedRange);
+    const boundedRange = validateRange(requestedRange);
     assertOpen();
     if (callerSignal?.aborted) throw abortError();
 
     let currentSession = await getSession(callerSignal);
+    const range = fromOffset > 0
+      ? { start: fromOffset, end: currentSession.encryptedSize - 1 }
+      : boundedRange;
     for (let attempt = 0; attempt < 2; attempt++) {
       if (callerSignal?.aborted) throw abortError();
       let response = await performFetch(currentSession, range, callerSignal);
@@ -484,11 +528,80 @@ export function createDirectPayloadSource(
     throw new Error("Direct Drive authorization failed. Reconnect your Google account and try again.");
   };
 
+  async function fetchMeta(from: number, callerSignal?: AbortSignal): Promise<Response> {
+    let current = await getSession(callerSignal);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const pair = current.offline;
+      if (!pair || from >= pair.meta.size) throw new Error("Invalid encrypted metadata offset.");
+      const headers = new Headers({ Authorization: `Bearer ${current.accessToken}` });
+      if (current.metaResourceKey) {
+        headers.set("X-Goog-Drive-Resource-Keys", `${pair.meta.id}/${current.metaResourceKey}`);
+      }
+      if (from) headers.set("Range", `bytes=${from}-`);
+      let response: Response;
+      try {
+        response = await fetchImpl(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(pair.meta.id)}?alt=media`, {
+          headers,
+          credentials: "omit",
+          mode: "cors",
+          referrerPolicy: "no-referrer",
+          cache: "no-store",
+          redirect: "error",
+          signal: abortAwareSignal(lifetimeSignal, callerSignal),
+        });
+      } catch {
+        if (callerSignal?.aborted || lifetimeSignal.aborted) throw abortError();
+        throw new PayloadTransportError("Could not connect to Google Drive to download encrypted metadata.");
+      }
+      if (AUTH_RETRY_STATUSES.has(response.status)) {
+        await discardBody(response);
+        if (attempt > 0) throw googleResponseError(response.status);
+        current = await refreshAfterAuthorizationFailure(current, callerSignal);
+        continue;
+      }
+      try {
+        if (response.status !== (from ? 206 : 200) || !response.body) throw googleResponseError(response.status);
+        const length = response.headers.get("Content-Length");
+        if (length !== null && rangeLengthHeader(response) !== pair.meta.size - from) {
+          throw new Error("Google Drive returned an invalid encrypted metadata size.");
+        }
+        const range = response.headers.get("Content-Range");
+        if (from && range !== null) {
+          validateReadableContentRange(range, { start: from, end: pair.meta.size - 1 }, pair.meta.size - 1, pair.meta.size);
+        }
+        return response;
+      } catch (error) {
+        await discardBody(response);
+        throw error;
+      }
+    }
+    throw new Error("Encrypted metadata authorization failed.");
+  }
+
   if (parentSignal?.aborted) close();
   else parentSignal?.addEventListener("abort", close, { once: true });
 
   return {
-    fetch: fetchPayload,
+    fetch: (range, signal) => fetchPayload(range, signal),
+    async pair(signal) {
+      const pair = (await getSession(signal)).offline;
+      if (!pair) throw new Error("An encrypted download session is required.");
+      return pair;
+    },
+    fetchPart(part, offset, signal) {
+      if (!offline || !Number.isSafeInteger(offset) || offset < 0) {
+        return Promise.reject(new Error("Invalid encrypted download offset."));
+      }
+      return part === "meta" ? fetchMeta(offset, signal) : fetchPayload(undefined, signal, offset);
+    },
     close,
   };
+}
+
+export function createDirectPayloadSource(metaFileId: string, options: DirectPayloadSourceOptions = {}): DirectPayloadSource {
+  return openPayloadSource(metaFileId, options, false);
+}
+
+export function createEncryptedPayloadSource(metaFileId: string, options: DirectPayloadSourceOptions = {}): EncryptedPayloadSource {
+  return openPayloadSource(metaFileId, options, true);
 }

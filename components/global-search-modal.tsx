@@ -113,6 +113,8 @@ export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
       toggleFileSelection({
         id: fileId,
         metaFileId: file.driveFile.id,
+        driveFile: file.driveFile,
+        displayName: file.details?.name || file.originalFileName,
         name: file.originalFileName,
         relativePath: file.relativePath,
         expectedSize:
@@ -196,14 +198,12 @@ export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
               </div>
             ) : (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                {searchResults.map((file) => {
-                  const fileId = file.driveFile.name.replace(".meta", "");
-                  return (
+                {searchResults.map((file) => (
                     <div key={file.driveFile.id} className="relative">
                       <MetaCard
                         meta={file}
                         isSelectionMode={isSelectionMode}
-                        isSelected={isFileSelected(fileId)}
+                        isSelected={isFileSelected(file.driveFile.id)}
                         onClick={() => handleCardClick(file)}
                       />
                       {/* Location Badge */}
@@ -215,8 +215,7 @@ export function GlobalSearchModal({ isOpen, onClose }: GlobalSearchModalProps) {
                         </div>
                       )}
                     </div>
-                  );
-                })}
+                ))}
               </div>
             )}
           </div>

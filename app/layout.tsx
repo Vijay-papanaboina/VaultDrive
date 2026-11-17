@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { CryptoProvider } from "@/hooks/use-crypto";
 import { QueryProvider } from "@/components/query-provider";
+import { LocalDownloadProvider } from "@/components/local-download-provider";
 
 const geistSans = Geist({
   variable: "--font-sans",
@@ -15,7 +16,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "VaultDrive — Encrypted Drive Viewer",
+  title: "VaultDrive: Encrypted Drive Viewer",
   description:
     "Browse your age-encrypted Google Drive files with metadata and requested file downloads decrypted entirely in your browser.",
   keywords: ["encrypted", "google drive", "age encryption", "privacy", "metadata viewer"],
@@ -33,7 +34,7 @@ export default function RootLayout({
     >
       <body className="min-h-screen bg-background text-foreground antialiased">
         <QueryProvider>
-          <CryptoProvider>{children}</CryptoProvider>
+          <CryptoProvider><LocalDownloadProvider>{children}</LocalDownloadProvider></CryptoProvider>
         </QueryProvider>
       </body>
     </html>

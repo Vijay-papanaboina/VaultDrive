@@ -38,6 +38,7 @@ const VAULTDRIVE_CREATING_PAYLOAD = "creating-payload";
 const VAULTDRIVE_PENDING = "pending";
 const VAULTDRIVE_COMPLETED = "completed";
 const MAX_META_BYTES = 25 * 1024 * 1024;
+const DRIVE_FILE_ID_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
 const activePayloadSessionCreations = new Map<string, Map<string, Promise<PayloadUploadSession>>>();
 
 async function driveGet(
@@ -1016,20 +1017,106 @@ export async function trashVaultFilePair(
   return { metaFileId: meta.id, payloadFileId: payload.id };
 }
 
+interface PayloadPairDriveFile {
+  id: string;
+  name: string;
+  parents?: string[];
+  size?: string;
+  resourceKey?: string;
+  appProperties?: Record<string, string>;
+  trashed?: boolean;
+  mimeType?: string;
+  modifiedTime?: string;
+  headRevisionId?: string;
+  version?: string | number;
+  sha256Checksum?: string;
+  md5Checksum?: string;
+}
+
+interface ResolvedPayloadPair {
+  meta: PayloadPairDriveFile;
+  payload: PayloadPairDriveFile;
+}
+
+function hasOwnProperty(record: Record<string, unknown>, property: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, property);
+}
+
+function validateOfflineUploadBindings(meta: PayloadPairDriveFile, payload: PayloadPairDriveFile): void {
+  const metaProperties = meta.appProperties ?? {};
+  const payloadProperties = payload.appProperties ?? {};
+  const metaHasPayloadId = hasOwnProperty(metaProperties, VAULTDRIVE_PAYLOAD_ID_PROPERTY);
+  const payloadHasMetaId = hasOwnProperty(payloadProperties, VAULTDRIVE_META_ID_PROPERTY);
+  const invalidDirection =
+    hasOwnProperty(metaProperties, VAULTDRIVE_META_ID_PROPERTY) ||
+    hasOwnProperty(payloadProperties, VAULTDRIVE_PAYLOAD_ID_PROPERTY);
+  const metaHasState = hasOwnProperty(metaProperties, VAULTDRIVE_UPLOAD_STATE_PROPERTY);
+  const payloadHasState = hasOwnProperty(payloadProperties, VAULTDRIVE_UPLOAD_STATE_PROPERTY);
+  const bindingRequired = metaHasPayloadId || payloadHasMetaId || invalidDirection || metaHasState || payloadHasState;
+  if (!bindingRequired) return;
+
+  const boundPayloadId = metaProperties[VAULTDRIVE_PAYLOAD_ID_PROPERTY];
+  const boundMetaId = payloadProperties[VAULTDRIVE_META_ID_PROPERTY];
+  if (
+    invalidDirection ||
+    !metaHasPayloadId ||
+    !payloadHasMetaId ||
+    typeof boundPayloadId !== "string" ||
+    !DRIVE_FILE_ID_PATTERN.test(boundPayloadId) ||
+    boundPayloadId !== payload.id ||
+    typeof boundMetaId !== "string" ||
+    !DRIVE_FILE_ID_PATTERN.test(boundMetaId) ||
+    boundMetaId !== meta.id
+  ) {
+    throw new DriveApiError("The metadata and payload upload bindings do not match", 409);
+  }
+
+  const metaState = metaProperties[VAULTDRIVE_UPLOAD_STATE_PROPERTY];
+  const payloadState = payloadProperties[VAULTDRIVE_UPLOAD_STATE_PROPERTY];
+  if (metaHasState || payloadHasState) {
+    if (!metaHasState || !payloadHasState) {
+      throw new DriveApiError("The metadata and payload upload states do not match", 409);
+    }
+    const isPendingComplete = metaState === VAULTDRIVE_PENDING && payloadState === VAULTDRIVE_COMPLETED;
+    const isBothComplete = metaState === VAULTDRIVE_COMPLETED && payloadState === VAULTDRIVE_COMPLETED;
+    const expectedPayloadSize = payloadProperties[VAULTDRIVE_EXPECTED_PAYLOAD_SIZE_PROPERTY];
+    const isReadyPendingPair = metaState === VAULTDRIVE_PENDING && payloadState === VAULTDRIVE_PENDING &&
+      typeof expectedPayloadSize === "string" && /^\d+$/.test(expectedPayloadSize) && payload.size === expectedPayloadSize &&
+      payload.name === meta.name.replace(/\.meta$/i, "");
+    if (!isPendingComplete && !isBothComplete && !isReadyPendingPair) {
+      throw new DriveApiError("The metadata and payload upload states do not match", 409);
+    }
+  }
+}
+
 async function resolvePayloadFile(
   accessToken: string,
   metaFileId: string,
-  signal?: AbortSignal
-): Promise<{ id: string; name: string; size?: string; resourceKey?: string }> {
+  signal?: AbortSignal,
+  offline = false
+): Promise<ResolvedPayloadPair> {
+  const metaFields = offline
+    ? "id,name,parents,appProperties,size,trashed,mimeType,modifiedTime,headRevisionId,version,sha256Checksum,md5Checksum,resourceKey"
+    : "id,name,parents,appProperties";
   const metaRes = await driveGet(
     accessToken,
     `/files/${encodeURIComponent(metaFileId)}`,
-    { fields: "id,name,parents,appProperties" },
+    { fields: metaFields },
     {},
     signal
   );
-  const metaFile: { id: string; name: string; parents?: string[]; appProperties?: Record<string, string> } =
-    await metaRes.json();
+  const metaFile = await metaRes.json() as PayloadPairDriveFile;
+
+  if (offline) {
+    if (!DRIVE_FILE_ID_PATTERN.test(metaFileId) || metaFile.id !== metaFileId) {
+      throw new DriveApiError("Drive returned an invalid metadata file ID", 502);
+    }
+    if (metaFile.trashed === true) throw new DriveApiError("Drive metadata file was not found", 404);
+    if (metaFile.trashed !== false) throw new DriveApiError("Drive returned invalid metadata file state", 502);
+    if (metaFile.mimeType === DRIVE_FOLDER_MIME_TYPE) {
+      throw new DriveApiError("Folders cannot be downloaded as file pairs", 400);
+    }
+  }
 
   if (!/\.meta$/i.test(metaFile.name)) {
     throw new Error("The requested file is not a metadata file");
@@ -1042,34 +1129,47 @@ async function resolvePayloadFile(
 
   const payloadName = metaFile.name.replace(/\.meta$/i, "");
   const q = `'${escapeDriveQueryValue(parentId)}' in parents and name = '${escapeDriveQueryValue(payloadName)}' and trashed = false`;
-  const payloads = await listAll(accessToken, q, "id,name,size,resourceKey,appProperties", signal) as Array<{
-    id: string;
-    name: string;
-    size?: string;
-    resourceKey?: string;
-    appProperties?: Record<string, string>;
-  }>;
+  const payloadFields = offline
+    ? "id,name,parents,size,resourceKey,appProperties,trashed,mimeType,modifiedTime,headRevisionId,version,sha256Checksum,md5Checksum"
+    : "id,name,size,resourceKey,appProperties";
+  const payloads = await listAll(accessToken, q, payloadFields, signal) as PayloadPairDriveFile[];
 
   if (payloads.length === 0) {
+    if (offline) throw new DriveApiError("The paired payload was not found", 404);
     throw new Error(`No payload found beside ${metaFile.name}`);
   }
   if (payloads.length > 1) {
+    if (offline) throw new DriveApiError("Multiple payloads found beside the metadata file", 409);
     throw new Error(`Multiple payloads found beside ${metaFile.name}`);
   }
 
   const payload = payloads[0];
+  if (offline) {
+    if (payload.name !== payloadName || !payload.parents?.includes(parentId)) {
+      throw new DriveApiError("The metadata and payload are not exact siblings", 409);
+    }
+    if (payload.trashed === true) throw new DriveApiError("The paired payload was not found", 404);
+    if (payload.trashed !== false) throw new DriveApiError("Drive returned invalid payload state", 502);
+    if (payload.mimeType === DRIVE_FOLDER_MIME_TYPE) {
+      throw new DriveApiError("Folders cannot be downloaded as file pairs", 400);
+    }
+  }
+
   const expectedSize = payload.appProperties?.[VAULTDRIVE_EXPECTED_PAYLOAD_SIZE_PROPERTY];
   if (expectedSize !== undefined) {
     const hasExpectedSize = /^\d+$/.test(expectedSize) && payload.size === expectedSize;
-    const hasBinding =
+    const hasBinding = !offline && (
       payload.appProperties?.[VAULTDRIVE_META_ID_PROPERTY] === metaFileId &&
-      metaFile.appProperties?.[VAULTDRIVE_PAYLOAD_ID_PROPERTY] === payload.id;
-    if (!hasExpectedSize || !hasBinding) {
+      metaFile.appProperties?.[VAULTDRIVE_PAYLOAD_ID_PROPERTY] === payload.id
+    );
+    if (!hasExpectedSize || (!offline && !hasBinding)) {
+      if (offline) throw new DriveApiError("Encrypted payload upload is incomplete or invalid", 409);
       throw new Error("Encrypted payload is still uploading");
     }
   }
 
-  return payload;
+  if (offline) validateOfflineUploadBindings(metaFile, payload);
+  return { meta: metaFile, payload };
 }
 
 /**
@@ -1083,6 +1183,21 @@ export interface PayloadDownloadSession {
   payloadFileId: string;
   encryptedSize: number;
   resourceKey?: string;
+  offline?: OfflinePayloadDownloadInfo;
+  metaResourceKey?: string;
+}
+
+export interface OfflineCiphertextInfo {
+  id: string;
+  revision: string;
+  size: number;
+  checksum: string;
+}
+
+export interface OfflinePayloadDownloadInfo {
+  meta: OfflineCiphertextInfo;
+  payload: OfflineCiphertextInfo;
+  modifiedTime: string;
 }
 
 interface DriveDownloadOperation {
@@ -1101,6 +1216,75 @@ function validResourceKey(value: unknown): value is string {
     value.length > 0 &&
     value.length <= MAX_RESOURCE_KEY_LENGTH &&
     !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function offlineCiphertextInfo(
+  file: PayloadPairDriveFile,
+  label: string,
+  maxSize?: number
+): OfflineCiphertextInfo {
+  if (typeof file.id !== "string" || !DRIVE_FILE_ID_PATTERN.test(file.id)) {
+    throw new DriveApiError(`Drive returned an invalid ${label} file ID`, 502);
+  }
+  if (typeof file.size !== "string" || !/^\d+$/.test(file.size)) {
+    throw new DriveApiError(`Drive did not provide a valid ${label} size`, 502);
+  }
+  const size = Number(file.size);
+  if (!Number.isSafeInteger(size) || size <= 0) {
+    throw new DriveApiError(`Drive did not provide a valid ${label} size`, 502);
+  }
+  if (maxSize !== undefined && size > maxSize) {
+    throw new DriveApiError("Encrypted metadata is too large", 413);
+  }
+
+  let revision: string | undefined;
+  const headRevision = file.headRevisionId;
+  if (typeof headRevision === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(headRevision)) {
+    revision = headRevision;
+  } else {
+    const version = typeof file.version === "number" && Number.isSafeInteger(file.version)
+      ? String(file.version)
+      : file.version;
+    if (typeof version === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(version)) {
+      revision = version;
+    }
+  }
+  if (!revision) throw new DriveApiError(`Drive did not provide a valid ${label} revision`, 502);
+
+  const sha256Checksum = file.sha256Checksum;
+  const md5Checksum = file.md5Checksum;
+  const checksum = typeof sha256Checksum === "string" && /^[a-f0-9]{64}$/i.test(sha256Checksum)
+    ? sha256Checksum.toLowerCase()
+    : typeof md5Checksum === "string" && /^[a-f0-9]{32}$/i.test(md5Checksum)
+      ? md5Checksum.toLowerCase()
+      : null;
+  if (!checksum) throw new DriveApiError(`Drive did not provide a valid ${label} checksum`, 502);
+
+  return { id: file.id, revision, size, checksum };
+}
+
+function offlinePairInfo(meta: PayloadPairDriveFile, payload: PayloadPairDriveFile): {
+  offline: OfflinePayloadDownloadInfo;
+  metaResourceKey?: string;
+} {
+  const metaInfo = offlineCiphertextInfo(meta, "metadata", MAX_META_BYTES);
+  const payloadInfo = offlineCiphertextInfo(payload, "payload");
+  if (metaInfo.id === payloadInfo.id) {
+    throw new DriveApiError("Metadata and payload must be separate Drive files", 502);
+  }
+
+  if (meta.resourceKey !== undefined && !validResourceKey(meta.resourceKey)) {
+    throw new DriveApiError("Drive returned an invalid metadata resource key", 502);
+  }
+  const modifiedTime = meta.modifiedTime ?? "";
+  if (typeof modifiedTime !== "string" || (modifiedTime !== "" && !Number.isFinite(Date.parse(modifiedTime)))) {
+    throw new DriveApiError("Drive returned an invalid metadata modification date", 502);
+  }
+
+  return {
+    offline: { meta: metaInfo, payload: payloadInfo, modifiedTime },
+    ...(meta.resourceKey ? { metaResourceKey: meta.resourceKey } : {}),
+  };
 }
 
 function downloadOperationId(name: unknown): string {
@@ -1181,7 +1365,9 @@ function toDownloadSession(
   operation: DriveDownloadOperation,
   payloadFile: { id: string; resourceKey?: string },
   encryptedSize: number,
-  operationResourceKey?: string
+  operationResourceKey?: string,
+  offlineInfo?: OfflinePayloadDownloadInfo,
+  metaResourceKey?: string
 ): PayloadDownloadSession {
   assertNoOperationError(operation);
   if (operation.done !== true || !operation.response || typeof operation.response.partialDownloadAllowed !== "boolean") {
@@ -1199,19 +1385,23 @@ function toDownloadSession(
     payloadFileId: payloadFile.id,
     encryptedSize,
     ...(resourceKey ? { resourceKey } : {}),
+    ...(offlineInfo ? { offline: offlineInfo } : {}),
+    ...(metaResourceKey ? { metaResourceKey } : {}),
   };
 }
 
 export async function createPayloadDownloadSession(
   accessToken: string,
   metaFileId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  offline = false
 ): Promise<PayloadDownloadSession> {
   const deadlineSignal = AbortSignal.timeout(MAX_DOWNLOAD_SESSION_MS);
   const combinedSignal = signal ? AbortSignal.any([signal, deadlineSignal]) : deadlineSignal;
 
   try {
-    const payloadFile = await resolvePayloadFile(accessToken, metaFileId, combinedSignal);
+    const resolvedPair = await resolvePayloadFile(accessToken, metaFileId, combinedSignal, offline);
+    const { meta: metaFile, payload: payloadFile } = resolvedPair;
     if (!payloadFile.size || !/^\d+$/.test(payloadFile.size)) {
       throw new DriveApiError("Encrypted payload size is invalid", 502);
     }
@@ -1222,6 +1412,7 @@ export async function createPayloadDownloadSession(
     if (payloadFile.resourceKey !== undefined && !validResourceKey(payloadFile.resourceKey)) {
       throw new DriveApiError("Encrypted payload metadata is invalid", 502);
     }
+    const offlineInfo = offline ? offlinePairInfo(metaFile, payloadFile) : undefined;
 
     const headers: Record<string, string> = authHeaders(accessToken);
     if (payloadFile.resourceKey) {
@@ -1277,7 +1468,14 @@ export async function createPayloadDownloadSession(
       }
       operationResourceKey = operation.metadata.resourceKey;
     }
-    return toDownloadSession(operation, payloadFile, encryptedSize, operationResourceKey);
+    return toDownloadSession(
+      operation,
+      payloadFile,
+      encryptedSize,
+      operationResourceKey,
+      offlineInfo?.offline,
+      offlineInfo?.metaResourceKey
+    );
   } catch (error) {
     if (signal?.aborted) throw error;
     if (deadlineSignal.aborted) {

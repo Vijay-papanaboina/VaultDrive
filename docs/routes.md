@@ -18,7 +18,7 @@ Better Auth stores application sessions and OAuth credentials in PostgreSQL thro
 - `/api/drive/folders/route.ts`: Proxies requests to `lib/google-drive.ts` (`listFolders`). Queries the Google Drive API for folder structures within a specified parent ID.
 - `/api/drive/meta/route.ts`: Queries the list of `.meta` files inside a given parent folder and hides incomplete metadata uploads.
 - `/api/drive/meta/[fileId]/route.ts`: `GET` fetches bounded encrypted `.meta` bytes. `PUT` remains a separate bounded proxy operation that accepts an already encrypted `application/octet-stream` body and replaces only that Drive file's content after checking the optional `If-Unmodified-Since` value. `DELETE` moves the verified `.meta` and original pair to recoverable Google Drive Trash after explicit confirmation; clearing transfer history does not delete Drive files.
-- `/api/drive/payload/[metaFileId]/route.ts`: Authenticated `POST` resolves the securely paired payload and creates a Google `files.download` operation. It polls pending operations server-side and returns JSON with a validated `downloadUri`, encrypted size, resource key when present, and a short-lived `drive.readonly` token. The browser sends the resource key on direct Google requests when present. The route never fetches or relays payload bytes. `GET` returns 405, with no proxy fallback.
+- `/api/drive/payload/[metaFileId]/route.ts`: Authenticated `POST` resolves the securely paired payload and creates a Google `files.download` operation. It polls pending operations server-side and returns JSON with a validated `downloadUri`, encrypted size, resource key when present, and a short-lived `drive.readonly` token. `?offline=1` also returns both ciphertext versions and checksums for the local library. The browser fetches the actual bytes from Drive. `GET` returns 405, with no proxy fallback.
 - `/api/drive/path/route.ts`: Resolves folder path lineage by walking up the parent tree in Google Drive, returning breadcrumb data.
 
 ## Shared Client Utilities
@@ -49,7 +49,7 @@ The UI is broken down into specific interactive client components ensuring optim
    - Global navigation header.
    - Contains the global search trigger, breadcrumb navigation, and user session menu.
    - Includes a "Re-enter Key" button allowing users to update their memory passphrase seamlessly.
-   - When files are selected, offers both `files.txt` export and direct original-file downloads.
+   - When files are selected, offers original downloads, encrypted downloads, `files.txt` export, and confirmed bulk Drive Trash.
 
 3. `DriveFileBrowser`:
    - Shared browser shell used by both the normal folder page and recursive search page.

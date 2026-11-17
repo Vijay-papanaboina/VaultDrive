@@ -2,11 +2,14 @@
 
 import React, { createContext, useContext, useState, ReactNode, useCallback, useEffect } from "react";
 import { useCrypto } from "@/hooks/use-crypto";
+import type { DriveMetaFile } from "@/types";
 
 export interface SelectedFile {
   id: string;
   metaFileId: string;
   name: string;
+  displayName: string;
+  driveFile: DriveMetaFile;
   relativePath: string; // relative to root folder
   expectedSize?: number;
 }
@@ -35,9 +38,9 @@ export function SelectionProvider({ children }: { children: ReactNode }) {
 
   const toggleFileSelection = useCallback((file: SelectedFile) => {
     setSelectedFiles((prev) => {
-      const exists = prev.some((f) => f.id === file.id);
+      const exists = prev.some((f) => f.metaFileId === file.metaFileId);
       if (exists) {
-        return prev.filter((f) => f.id !== file.id);
+        return prev.filter((f) => f.metaFileId !== file.metaFileId);
       } else {
         return [...prev, file];
       }
@@ -55,7 +58,7 @@ export function SelectionProvider({ children }: { children: ReactNode }) {
   useEffect(() => registerSensitiveCleanup(clearSelection), [clearSelection, registerSensitiveCleanup]);
 
   const isFileSelected = useCallback((id: string) => {
-    return selectedFiles.some((f) => f.id === id);
+    return selectedFiles.some((f) => f.metaFileId === id);
   }, [selectedFiles]);
 
   const exportFilesList = useCallback(() => {
