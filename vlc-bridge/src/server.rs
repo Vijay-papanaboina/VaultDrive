@@ -56,7 +56,6 @@ const PLAY_LIMIT: usize = 2 * 1024 * 1024;
 const STOP_LIMIT: usize = 32 * 1024;
 const CONTROL_CONTEXT: &[u8] = b"VaultDrive VLC control v2";
 const FOLDER_ERROR: &str = "VLC folder does not match the folder chosen in Downloads Settings";
-const PICKER_TITLE: &str = "Choose the VaultDrive download folder";
 const PICKER_SECONDS: u64 = 75;
 const MAX_DIRECTORY: usize = 4096;
 
@@ -143,7 +142,10 @@ fn unseal_control<T: DeserializeOwned>(
     path: &str,
     bytes: &[u8],
 ) -> Result<T> {
-    let denied = Error::new(401, "Playback authentication failed. Pair the helper again.");
+    let denied = Error::new(
+        401,
+        "Playback authentication failed. Pair the helper again.",
+    );
     let sealed: ControlEnvelope = serde_json::from_slice(bytes).map_err(|_| denied)?;
     if !hex_id(&sealed.nonce, 24)
         || sealed.ciphertext.len() < 32
@@ -172,9 +174,7 @@ fn unseal_control<T: DeserializeOwned>(
         .map_err(|_| denied)?;
 
     let authenticated: ControlData<T> = serde_json::from_slice(&clear).map_err(|_| denied)?;
-    if authenticated.sent_at < started_at_ms
-        || now.abs_diff(authenticated.sent_at) > FRESH_MILLIS
-    {
+    if authenticated.sent_at < started_at_ms || now.abs_diff(authenticated.sent_at) > FRESH_MILLIS {
         return Err(denied);
     }
 
@@ -257,18 +257,28 @@ fn picker_directory(state: &State, folder_key: &str) -> Result<(Arc<Library>, Pa
         .picker
         .try_lock()
         .map_err(|_| Error::setup(FOLDER_ERROR))?;
-    let executable = if Path::new("/bin/zenity").is_file() {
-        "/bin/zenity"
-    } else {
-        "zenity"
-    };
-    let mut child = Command::new(executable)
-        .args([
+    #[cfg(unix)]
+    let mut command = {
+        let mut command = Command::new(if Path::new("/bin/zenity").is_file() {
+            "/bin/zenity"
+        } else {
+            "zenity"
+        });
+        command.args([
             "--file-selection",
             "--directory",
             "--timeout=75",
             "--title=Choose the VaultDrive download folder",
-        ])
+        ]);
+        command
+    };
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = Command::new(env::current_exe()?);
+        command.arg("__pick-folder");
+        command
+    };
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -321,7 +331,10 @@ fn play_directory(
 ) -> Result<(Arc<Library>, PathBuf)> {
     let mut candidates = Vec::new();
     if let Some(directory) = request.directory.as_deref() {
+        #[cfg(unix)]
         candidates.push(PathBuf::from(directory));
+        #[cfg(windows)]
+        candidates.push(crate::windows::directory_from_browser(directory));
     }
     if let Some(directory) = state.config.directory.as_ref() {
         candidates.push(directory.clone());
@@ -329,7 +342,11 @@ fn play_directory(
     if let Ok(directory) = env::current_dir() {
         candidates.push(directory);
     }
-    if let Some(home) = env::var_os("HOME") {
+    #[cfg(unix)]
+    let home = env::var_os("HOME");
+    #[cfg(windows)]
+    let home = env::var_os("USERPROFILE");
+    if let Some(home) = home {
         let downloads = PathBuf::from(home).join("Downloads");
         candidates.push(downloads.clone());
         if let Some(name) = request
@@ -363,6 +380,10 @@ fn dispatch(state: &State, path: &str, bytes: &[u8]) -> Result<Reply> {
         "/v1/play" => {
             let request = unseal::<crate::player::PlayRequest>(state, path, bytes)?;
             let (library, directory) = play_directory(state, &request)?;
+            #[cfg(windows)]
+            let directory = crate::windows::browser_directory(&directory)
+                .filter(|value| value.len() <= MAX_DIRECTORY)
+                .ok_or(Error::setup(FOLDER_ERROR))?;
             let (count, playback_id) = state.player.play(library, request)?;
             Ok(json_reply(
                 &json!({ "count": count, "playbackId": playback_id, "directory": directory }),
@@ -583,36 +604,35 @@ async fn handle(
         return Ok(response(403, full("")));
     }
     let path = request.uri().path();
-    let mut result = if request.method() == "OPTIONS"
-        && matches!(path, "/v1/play" | "/v1/play/stop")
-    {
-        let mut reply = response(204, full(""));
-        for (name, value) in [
-            (header::ACCESS_CONTROL_ALLOW_HEADERS, HEADERS),
-            (header::ACCESS_CONTROL_ALLOW_METHODS, METHODS),
-            (header::ACCESS_CONTROL_MAX_AGE, "600"),
-        ] {
-            reply
-                .headers_mut()
-                .insert(name, header::HeaderValue::from_static(value));
-        }
-        reply
-    } else if request.method() == "POST" && matches!(path, "/v1/play" | "/v1/play/stop") {
-        let method = request.method().clone();
-        let path = request.uri().path().to_owned();
-        match command(state.clone(), request).await {
-            Ok(reply) => reply,
-            Err(error) => {
-                eprintln!(
-                    "VaultDrive VLC request rejected: method={} path={} status={} reason={}",
-                    method, path, error.status, error.message
-                );
-                json_reply(&json!({ "error": error.message }), error.status)
+    let mut result =
+        if request.method() == "OPTIONS" && matches!(path, "/v1/play" | "/v1/play/stop") {
+            let mut reply = response(204, full(""));
+            for (name, value) in [
+                (header::ACCESS_CONTROL_ALLOW_HEADERS, HEADERS),
+                (header::ACCESS_CONTROL_ALLOW_METHODS, METHODS),
+                (header::ACCESS_CONTROL_MAX_AGE, "600"),
+            ] {
+                reply
+                    .headers_mut()
+                    .insert(name, header::HeaderValue::from_static(value));
             }
-        }
-    } else {
-        response(404, full(""))
-    };
+            reply
+        } else if request.method() == "POST" && matches!(path, "/v1/play" | "/v1/play/stop") {
+            let method = request.method().clone();
+            let path = request.uri().path().to_owned();
+            match command(state.clone(), request).await {
+                Ok(reply) => reply,
+                Err(error) => {
+                    eprintln!(
+                        "VaultDrive VLC request rejected: method={} path={} status={} reason={}",
+                        method, path, error.status, error.message
+                    );
+                    json_reply(&json!({ "error": error.message }), error.status)
+                }
+            }
+        } else {
+            response(404, full(""))
+        };
     cors(&mut result, &state.origin);
     Ok(result)
 }
@@ -624,7 +644,18 @@ pub async fn serve(config: Config, print_pairing: bool) -> Result<()> {
     if print_pairing {
         println!("Pairing code: {}", config.pairing_code());
     }
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    #[cfg(unix)]
+    let interrupted = {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        async move {
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => result,
+                _ = terminate.recv() => Ok(()),
+            }
+        }
+    };
+    #[cfg(windows)]
     let interrupted = tokio::signal::ctrl_c();
     tokio::pin!(interrupted);
     let state = Arc::new(State {
@@ -642,7 +673,6 @@ pub async fn serve(config: Config, print_pairing: bool) -> Result<()> {
     loop {
         tokio::select! {
             _ = &mut interrupted => break,
-            _ = terminate.recv() => break,
             result = listener.accept() => {
                 let (stream, peer) = result?;
                 if !peer.ip().is_loopback() { continue; }

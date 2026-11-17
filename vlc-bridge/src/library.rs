@@ -1,10 +1,16 @@
 use std::{
-    ffi::CString,
     fs::File,
     io::{self, Read},
-    os::fd::{AsRawFd, FromRawFd},
-    os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::Path,
+};
+
+#[cfg(unix)]
+use std::{
+    ffi::CString,
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::fs::MetadataExt,
+    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -100,6 +106,7 @@ pub struct Library {
     folder_key: String,
 }
 
+#[cfg(unix)]
 fn component(name: &str) -> io::Result<CString> {
     if name.is_empty() || name == "." || name == ".." || name.contains('/') {
         return Err(io::Error::new(
@@ -111,7 +118,8 @@ fn component(name: &str) -> io::Result<CString> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path component contains NUL"))
 }
 
-fn open_directory_at(parent: &File, name: &str, missing_message: &'static str) -> Result<File> {
+#[cfg(unix)]
+fn directory_at(parent: &File, name: &str) -> io::Result<File> {
     let name = component(name)?;
     // SAFETY: the parent descriptor is live and name is a NUL-terminated single component.
     let descriptor = unsafe {
@@ -122,20 +130,31 @@ fn open_directory_at(parent: &File, name: &str, missing_message: &'static str) -
         )
     };
     if descriptor < 0 {
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::NotFound {
-            return Err(Error::missing(missing_message));
-        }
-        return Err(error.into());
+        return Err(io::Error::last_os_error());
     }
     // SAFETY: openat returned a new owned descriptor.
     let directory = unsafe { File::from_raw_fd(descriptor) };
     if !directory.metadata()?.is_dir() {
-        return Err(Error::conflict(missing_message));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a directory",
+        ));
     }
     Ok(directory)
 }
 
+#[cfg(windows)]
+use crate::windows::{directory_at, file_at as open_file_at};
+
+fn open_directory_at(parent: &File, name: &str, missing_message: &'static str) -> Result<File> {
+    directory_at(parent, name).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => Error::missing(missing_message),
+        io::ErrorKind::InvalidData => Error::conflict(missing_message),
+        _ => error.into(),
+    })
+}
+
+#[cfg(unix)]
 fn open_file_at(directory: &File, name: &str) -> io::Result<File> {
     let name = component(name)?;
     // SAFETY: the directory descriptor is live and name is a NUL-terminated single component.
@@ -196,7 +215,7 @@ fn verify_folder_marker(root: &File, folder_key: &str) -> Result<()> {
 
 impl Library {
     pub fn open(directory: &Path, folder_key: &str) -> Result<Self> {
-        if directory.as_os_str().as_bytes().len() > 4096 || !directory.is_absolute() {
+        if directory.as_os_str().as_encoded_bytes().len() > 4096 || !directory.is_absolute() {
             return Err(Error::bad("Invalid VLC download folder"));
         }
         let selected_root = open_directory(directory)
@@ -269,11 +288,9 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        fs,
-        os::unix::fs::{PermissionsExt, symlink},
-        path::PathBuf,
-    };
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::{fs, path::PathBuf};
 
     fn pair() -> Pair {
         Pair {
@@ -293,6 +310,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn set_writable_directory(path: &Path) {
         fs::set_permissions(path, fs::Permissions::from_mode(0o777)).unwrap();
     }
@@ -304,6 +322,7 @@ mod tests {
     fn write_root(parent: &Path, key: &str) -> PathBuf {
         let root = parent.join(".vaultdrive-downloads");
         fs::create_dir(&root).unwrap();
+        #[cfg(unix)]
         set_writable_directory(&root);
         fs::write(root.join(".folder-id"), key).unwrap();
         root
@@ -315,6 +334,7 @@ mod tests {
         let id = pair.id().unwrap();
         let dir = root.join(&id);
         fs::create_dir(&dir).unwrap();
+        #[cfg(unix)]
         set_writable_directory(&dir);
         let manifest = Manifest {
             version: 1,
@@ -342,8 +362,9 @@ mod tests {
     }
 
     #[test]
-    fn playback_accepts_group_world_writable_directories() {
+    fn playback_reads_a_valid_local_payload() {
         let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
         set_writable_directory(directory.path());
         let key = folder_key();
         let id = write_entry(directory.path(), &key, Status::Complete, b"payload");
@@ -359,12 +380,30 @@ mod tests {
         let store = Library::open(directory.path(), &key).unwrap();
         assert!(store.open_media("../outside").is_err());
 
-        let root = directory.path().join(".vaultdrive-downloads");
-        let outside = directory.path().join("outside");
-        fs::create_dir(&outside).unwrap();
-        set_writable_directory(&outside);
-        let id = pair().id().unwrap();
-        symlink(&outside, root.join(&id)).unwrap();
+        #[cfg(unix)]
+        {
+            let root = directory.path().join(".vaultdrive-downloads");
+            let outside = directory.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            set_writable_directory(&outside);
+            let id = pair().id().unwrap();
+            symlink(&outside, root.join(&id)).unwrap();
+            assert!(store.open_media(&id).is_err());
+        }
+    }
+
+    #[test]
+    fn playback_rejects_hard_linked_payloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = folder_key();
+        let id = write_entry(directory.path(), &key, Status::Complete, b"payload");
+        let store = Library::open(directory.path(), &key).unwrap();
+        let payload = directory
+            .path()
+            .join(".vaultdrive-downloads")
+            .join(&id)
+            .join("payload.age");
+        fs::hard_link(payload, directory.path().join("second-link")).unwrap();
         assert!(store.open_media(&id).is_err());
     }
 

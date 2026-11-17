@@ -1,9 +1,13 @@
 use std::{
     env, fs,
     io::{self, Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
+
+#[cfg(windows)]
+pub use crate::windows::{open_directory, open_file, random};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
@@ -21,12 +25,14 @@ pub struct Config {
     key: String,
 }
 
+#[cfg(unix)]
 pub fn random<const N: usize>() -> io::Result<[u8; N]> {
     let mut bytes = [0; N];
     fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes)
 }
 
+#[cfg(unix)]
 fn default_path(var: &str, fallback: &str) -> Result<PathBuf> {
     if let Some(path) = env::var_os(var).filter(|value| !value.is_empty()) {
         let path = PathBuf::from(path);
@@ -37,10 +43,23 @@ fn default_path(var: &str, fallback: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(env::var_os("HOME").ok_or(Error::setup("HOME is not set"))?).join(fallback))
 }
 
+#[cfg(unix)]
 pub fn config_dir() -> Result<PathBuf> {
     Ok(default_path("XDG_CONFIG_HOME", ".config")?.join("vaultdrive-vlc"))
 }
 
+#[cfg(windows)]
+pub fn config_dir() -> Result<PathBuf> {
+    env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .map(|path| path.join("vaultdrive-vlc"))
+        .ok_or(Error::setup(
+            "Windows local application data directory is unavailable",
+        ))
+}
+
+#[cfg(unix)]
 pub fn open_file(path: &Path) -> io::Result<fs::File> {
     let file = fs::OpenOptions::new()
         .read(true)
@@ -56,6 +75,7 @@ pub fn open_file(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
+#[cfg(unix)]
 pub fn open_directory(path: &Path) -> io::Result<fs::File> {
     let directory = fs::OpenOptions::new()
         .read(true)
@@ -70,6 +90,7 @@ pub fn open_directory(path: &Path) -> io::Result<fs::File> {
     Ok(directory)
 }
 
+#[cfg(unix)]
 pub fn private_dir(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     match fs::DirBuilder::new().mode(0o700).create(path) {
@@ -80,6 +101,7 @@ pub fn private_dir(path: &Path) -> io::Result<()> {
     check_private_dir(path)
 }
 
+#[cfg(unix)]
 pub fn check_private_dir(path: &Path) -> io::Result<()> {
     let stat = fs::symlink_metadata(path)?;
     // SAFETY: geteuid takes no arguments and has no preconditions.
@@ -92,13 +114,25 @@ pub fn check_private_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub fn private_dir(path: &Path) -> io::Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    open_directory(path).map(drop)
+}
+
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     let mut tmp = NamedTempFile::new_in(dir)?;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
     tmp.persist(path)?;
-    fs::File::open(dir)?.sync_all()
+    #[cfg(unix)]
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
 }
 
 fn validate_origin(origin: &str) -> bool {
@@ -144,11 +178,16 @@ impl Config {
             .map_err(|_| Error::setup("Run vaultdrive-vlc serve <VaultDrive origin> first"))?;
         let file = open_file(&dir.join("config.json"))
             .map_err(|_| Error::setup("Run vaultdrive-vlc serve <VaultDrive origin> first"))?;
+        #[cfg(unix)]
         if file.metadata()?.permissions().mode() & 0o077 != 0 {
             return Err(Error::setup("Helper config must be readable only by you"));
         }
         let mut bytes = Zeroizing::new(Vec::new());
         file.take(8193).read_to_end(&mut bytes)?;
+        #[cfg(windows)]
+        let bytes = crate::windows::config_bytes(&bytes, false).map_err(|_| {
+            Error::setup("Helper configuration is not readable by this Windows user")
+        })?;
         let config: Self = serde_json::from_slice(&bytes)
             .map_err(|_| Error::setup("Invalid helper configuration"))?;
         if !validate_origin(&config.origin)
@@ -208,6 +247,8 @@ impl Config {
             serde_json::to_vec(self)
                 .map_err(|_| Error::setup("Could not save helper configuration"))?,
         );
+        #[cfg(windows)]
+        let bytes = crate::windows::config_bytes(&bytes, true)?;
         atomic_write(&config_dir()?.join("config.json"), &bytes)?;
         Ok(())
     }

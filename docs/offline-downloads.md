@@ -6,27 +6,36 @@
 
 In **Encrypted Downloads settings**, choose a folder with Chrome or Edge. VaultDrive remembers the folder handle in IndexedDB and writes to `.vaultdrive-downloads` inside it. If the browser revokes permission, use **Allow access** in Settings. Choosing a folder, downloading, resuming, browsing, and deleting local files do not require the VLC helper. To keep an existing library, choose the folder that already contains its `.vaultdrive-downloads` directory.
 
-## Play in VLC on Arch Linux
+## Install the VLC helper
 
-From the Web repository:
+Download the Linux x64 or Windows x64 helper from [GitHub Releases](https://github.com/Vijay-papanaboina/VaultDrive/releases). Install VLC 3 separately.
+
+On Arch Linux:
 
 ```sh
-sudo pacman -S --needed rust vlc vlc-plugin-lua vlc-plugin-ffmpeg
-cargo build --release --locked --manifest-path vlc-bridge/Cargo.toml
-install -Dm755 vlc-bridge/target/release/vaultdrive-vlc ~/.local/bin/vaultdrive-vlc
+sudo pacman -S --needed vlc vlc-plugin-lua vlc-plugin-ffmpeg
+install -Dm755 vaultdrive-vlc-linux-x64 ~/.local/bin/vaultdrive-vlc
 
 ~/.local/bin/vaultdrive-vlc serve https://vault-drive-three.vercel.app
 ```
 
-Use your site's origin, including any non-default port. Local development can use `http://localhost:3000`. The helper prints the pairing code at startup. Rust is only needed to build the executable; install VLC 3 and its Lua plugin separately.
+On Windows, run this in PowerShell from the download folder:
 
-On the first **Play in VLC**, paste the printed code. The browser picker does not expose the absolute path, so the helper matches your download folder by its marker. It tries remembered and common locations and otherwise opens a desktop folder picker via `zenity`. Select the same folder once; VaultDrive remembers it for later plays. You can also pass the folder as an optional argument to `serve`.
+```powershell
+.\vaultdrive-vlc-windows-x64.exe serve https://vault-drive-three.vercel.app
+```
+
+The helper finds VLC in Program Files. For a portable or custom VLC installation, set `VAULTDRIVE_VLC` to the full path to `vlc.exe` before starting the helper.
+
+Use your site's origin, including any non-default port. Local development can use `http://localhost:3000`. The helper prints the pairing code at startup. To build from source instead, run `cargo build --release --locked --manifest-path vlc-bridge/Cargo.toml`.
+
+On the first **Play in VLC**, paste the printed code. The browser picker does not expose the absolute path, so the helper matches your download folder by its marker. It tries remembered and common locations and otherwise opens a desktop folder picker (`zenity` on Linux). Select the same folder once; VaultDrive remembers it for later plays. You can also pass the folder as an optional argument to `serve`.
 
 Playback does not require changing folder ownership or permissions. Use a folder whose contents you trust; anyone with write access can modify your encrypted library.
 
 Only pair a site you trust. If prompted, allow [loopback access](https://developer.chrome.com/docs/modern-web-guidance/guides/security/local-network-access) for that site. The permission is only needed for VLC.
 
-For automatic startup, first run `serve <origin>` once as above, then stop it and run:
+For automatic startup on Linux, first run `serve <origin>` once as above, then stop it and run:
 
 ```sh
 install -Dm644 vlc-bridge/vaultdrive-vlc.service ~/.config/systemd/user/vaultdrive-vlc.service

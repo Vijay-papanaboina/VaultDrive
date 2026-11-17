@@ -3,7 +3,6 @@ use std::{
     env,
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    os::{fd::OwnedFd, unix::net::UnixStream},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
@@ -12,6 +11,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::{fd::OwnedFd, unix::net::UnixStream};
 
 use age::{Decryptor, x25519::Identity};
 use serde::Deserialize;
@@ -216,10 +218,28 @@ impl Sessions {
     }
 }
 
-pub fn executable() -> std::ffi::OsString {
-    env::var_os("VAULTDRIVE_VLC")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "vlc".into())
+fn executable() -> Result<std::ffi::OsString> {
+    if let Some(executable) = env::var_os("VAULTDRIVE_VLC").filter(|value| !value.is_empty()) {
+        #[cfg(windows)]
+        if !std::path::Path::new(&executable).is_absolute() {
+            return Err(Error::setup(
+                "VAULTDRIVE_VLC must be an absolute path on Windows",
+            ));
+        }
+        return Ok(executable);
+    }
+    #[cfg(unix)]
+    return Ok("vlc".into());
+    #[cfg(windows)]
+    ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"]
+        .into_iter()
+        .filter_map(env::var_os)
+        .map(|base| std::path::PathBuf::from(base).join("VideoLAN/VLC/vlc.exe"))
+        .find(|path| path.is_absolute() && path.is_file())
+        .map(|path| path.into_os_string())
+        .ok_or(Error::setup(
+            "Install VLC 3 or set VAULTDRIVE_VLC to vlc.exe",
+        ))
 }
 
 struct Vlc {
@@ -234,22 +254,26 @@ impl Drop for Vlc {
     }
 }
 
-fn vlc_start(playback: &Playback, selected: usize) -> Result<Vlc> {
-    let profile = tempfile::Builder::new()
-        .prefix("vaultdrive-vlc-")
-        .tempdir_in("/tmp")?;
+fn vlc_start(playback: &Arc<Playback>, selected: usize) -> Result<Vlc> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("vaultdrive-vlc-");
+    #[cfg(unix)]
+    let profile = builder.tempdir_in("/tmp")?;
+    #[cfg(windows)]
+    let profile = builder.tempdir()?;
+    #[cfg(unix)]
     let scripts = profile.path().join("vlc/lua/intf");
+    #[cfg(windows)]
+    let scripts = profile.path().join("lua/intf");
     fs::create_dir_all(&scripts)?;
     fs::write(
         scripts.join("vaultdrive-playlist.lua"),
         include_bytes!("playlist.lua"),
     )?;
-    // VLC's Lua code receives data over an inherited private socket. It never
+    // VLC's Lua code receives data over inherited private IPC. It never
     // interprets filenames as commands or writes a playlist to disk.
-    let (stream, child_stream) = UnixStream::pair()?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let child = Command::new(executable())
+    let mut command = Command::new(executable()?);
+    command
         .args([
             "--no-one-instance",
             "--no-media-library",
@@ -265,54 +289,109 @@ fn vlc_start(playback: &Playback, selected: usize) -> Result<Vlc> {
             "--intf=dummy",
             "--lua-intf=vaultdrive-playlist",
         ])
-        .env("XDG_DATA_HOME", profile.path())
-        .stdin(Stdio::from(OwnedFd::from(child_stream.try_clone()?)))
-        .stdout(Stdio::from(OwnedFd::from(child_stream)))
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    let (mut stream, child_stream) = UnixStream::pair()?;
+    #[cfg(unix)]
+    {
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        command
+            .env("XDG_DATA_HOME", profile.path())
+            .stdin(Stdio::from(OwnedFd::from(child_stream.try_clone()?)))
+            .stdout(Stdio::from(OwnedFd::from(child_stream)));
+    }
+    #[cfg(windows)]
+    command
+        .env("VLC_DATA_PATH", profile.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    let child = command
         .spawn()
         .map_err(|_| Error::setup("Cannot start VLC. Install VLC 3 and its desktop interface."))?;
     let app = Vlc {
         child,
         _profile: profile,
     };
-    let mut channel = BufReader::new(stream);
-    let reply = |channel: &mut BufReader<UnixStream>, expected: &str| {
-        let mut response = String::new();
-        for _ in 0..4 {
-            response.clear();
-            match Read::by_ref(channel).take(256).read_line(&mut response) {
-                Ok(n) if n > 0 => {
-                    if response.trim_end() == expected {
-                        return true;
-                    }
-                }
-                _ => return false,
-            }
-        }
-        false
+    #[cfg(unix)]
+    send_playlist(
+        &mut BufReader::new(stream.try_clone()?),
+        &mut stream,
+        playback,
+        selected,
+    )?;
+    #[cfg(windows)]
+    let app = {
+        let mut app = app;
+        let input = app
+            .child
+            .stdout
+            .take()
+            .ok_or(Error::setup("VLC output pipe unavailable"))?;
+        let mut output = app
+            .child
+            .stdin
+            .take()
+            .ok_or(Error::setup("VLC input pipe unavailable"))?;
+        let session = Arc::clone(playback);
+        let (done, result) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = done.send(send_playlist(
+                &mut BufReader::new(input),
+                &mut output,
+                &session,
+                selected,
+            ));
+        });
+        // A hung VLC must not leave Play blocked on a platform pipe read.
+        result
+            .recv_timeout(Duration::from_secs(15))
+            .map_err(|_| Error::setup("VLC did not open the local playlist in time"))??;
+        app
     };
-    if !reply(&mut channel, "VAULTDRIVE-READY") {
+    Ok(app)
+}
+
+fn reply(channel: &mut impl BufRead, expected: &str) -> bool {
+    let mut response = String::new();
+    for _ in 0..4 {
+        response.clear();
+        match Read::by_ref(channel).take(256).read_line(&mut response) {
+            Ok(n) if n > 0 => {
+                if response.trim_end() == expected {
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn send_playlist(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    playback: &Playback,
+    selected: usize,
+) -> Result<()> {
+    if !reply(input, "VAULTDRIVE-READY") {
         return Err(Error::setup(
             "VLC could not start the playlist interface. Install the VLC 3 Lua plugin and check your desktop session.",
         ));
     }
-    writeln!(
-        channel.get_mut(),
-        "{}\n{}",
-        playback.tracks.len(),
-        selected + 1
-    )?;
+    writeln!(output, "{}\n{}", playback.tracks.len(), selected + 1)?;
     for (index, track) in playback.tracks.iter().enumerate() {
         if playback.closed.load(Ordering::Acquire) {
             return Err(Error::conflict("The VLC session was stopped"));
         }
         let url = playback.url(index);
-        writeln!(channel.get_mut(), "{}\n{}", *url, *track.name)?;
+        writeln!(output, "{}\n{}", *url, *track.name)?;
     }
-    if !reply(&mut channel, "VAULTDRIVE-PLAYING") {
+    output.flush()?;
+    if !reply(input, "VAULTDRIVE-PLAYING") {
         return Err(Error::setup("VLC could not open the local playlist."));
     }
-    Ok(app)
+    Ok(())
 }
 
 impl Player {
@@ -501,6 +580,38 @@ pub fn byte_range(range: Option<&str>, length: u64) -> Result<(u64, u64, bool)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires installed VLC 3"]
+    fn windows_vlc_loads_bridge_playlist() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join(".vaultdrive-downloads");
+        fs::create_dir(&root).unwrap();
+        let key = "0".repeat(64);
+        fs::write(root.join(".folder-id"), &key).unwrap();
+        let library = Arc::new(Library::open(directory.path(), &key).unwrap());
+        let session = Arc::new(Playback {
+            id: "0".repeat(32),
+            token: Zeroizing::new("0".repeat(64)),
+            tracks: ["First.mp4", "Second café.mp4", "Third.mp4"]
+                .into_iter()
+                .map(|name| Track {
+                    id: "0".repeat(64),
+                    name: Zeroizing::new(name.to_owned()),
+                    offset: 0,
+                    length: 1,
+                    mime: "video/mp4",
+                })
+                .collect(),
+            identity: Mutex::new(None),
+            library,
+            closed: Arc::new(AtomicBool::new(false)),
+        });
+        let mut app = vlc_start(&session, 1)
+            .expect("VLC did not acknowledge the playlist over its inherited pipes");
+        assert!(app.child.try_wait().unwrap().is_none());
+    }
 
     #[test]
     fn single_http_ranges() {

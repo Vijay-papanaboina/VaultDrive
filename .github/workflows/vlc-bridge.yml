@@ -1,0 +1,121 @@
+name: VLC bridge
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "vaultdrive-vlc-v*"
+    paths:
+      - "vlc-bridge/**"
+      - ".github/workflows/vlc-bridge.yml"
+  pull_request:
+    paths:
+      - "vlc-bridge/**"
+      - ".github/workflows/vlc-bridge.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact: vaultdrive-vlc-linux-x64
+            asset: vaultdrive-vlc-linux-x64
+          - name: Windows x64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: vaultdrive-vlc-windows-x64
+            asset: vaultdrive-vlc-windows-x64.exe
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Rust
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+
+      - name: Run Rust tests
+        run: cargo +stable test --locked --manifest-path vlc-bridge/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Smoke-test Windows VLC startup
+        if: matrix.os == 'windows-2025'
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'vlc.zip'
+          Invoke-WebRequest 'https://download.videolan.org/pub/videolan/vlc/3.0.24/win64/vlc-3.0.24-win64.zip' -OutFile $zip
+          $downloadHash = (Get-FileHash -Algorithm SHA256 $zip).Hash
+          if ($downloadHash -ne 'fcf30850371ad10c9373cc4f0f4501e7dee49e3e9ae9f20c72fb2661a1ca6323') {
+            throw "VLC archive checksum mismatch (received $downloadHash)"
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath $env:RUNNER_TEMP
+          $env:VAULTDRIVE_VLC = Join-Path $env:RUNNER_TEMP 'vlc-3.0.24/vlc.exe'
+          cargo +stable test --locked --manifest-path vlc-bridge/Cargo.toml --target ${{ matrix.target }} windows_vlc_loads_bridge_playlist -- --ignored
+
+      - name: Build release binary
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: cargo +stable build --release --locked --manifest-path vlc-bridge/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Package Linux binary
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          mkdir -p dist
+          cp "vlc-bridge/target/${{ matrix.target }}/release/vaultdrive-vlc" "dist/${{ matrix.asset }}"
+
+      - name: Package Windows binary
+        if: matrix.os == 'windows-2025'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item -LiteralPath "vlc-bridge/target/${{ matrix.target }}/release/vaultdrive-vlc.exe" -Destination "dist/${{ matrix.asset }}"
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release assets
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/vaultdrive-vlc-v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+
+      - name: Validate tag version
+        shell: bash
+        run: |
+          cargo_version="$(python3 -c 'import tomllib; print(tomllib.load(open("vlc-bridge/Cargo.toml", "rb"))["package"]["version"])')"
+          tag_version="${GITHUB_REF_NAME#vaultdrive-vlc-v}"
+          if [[ "$tag_version" == "$GITHUB_REF_NAME" || "$tag_version" != "$cargo_version" ]]; then
+            echo "Tag version $tag_version does not match Cargo.toml version $cargo_version" >&2
+            exit 1
+          fi
+
+      - name: Download packaged binaries
+        uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: vaultdrive-vlc-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: release-assets
+        run: |
+          sha256sum vaultdrive-vlc-linux-x64 vaultdrive-vlc-windows-x64.exe > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" vaultdrive-vlc-linux-x64 vaultdrive-vlc-windows-x64.exe SHA256SUMS --verify-tag --title "$GITHUB_REF_NAME" --generate-notes

@@ -2,6 +2,8 @@ mod config;
 mod library;
 mod player;
 mod server;
+#[cfg(windows)]
+mod windows;
 
 use std::{env, io, path::PathBuf, time::Duration};
 
@@ -66,6 +68,11 @@ fn run() -> Result<()> {
         .and_then(|arg| arg.into_string().ok())
         .as_deref()
     {
+        #[cfg(windows)]
+        Some("__pick-folder") if args.next().is_none() => {
+            println!("{}", windows::choose_folder()?);
+            Ok(())
+        }
         Some("reset-pairing") if args.next().is_none() => {
             let mut config = Config::load()?;
             config.reset_pairing()?;
