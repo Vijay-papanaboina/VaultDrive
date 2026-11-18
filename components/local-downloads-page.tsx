@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import Link from "next/link";
-import { AlertCircle, ArrowLeft, ChevronLeft, ChevronRight, HardDriveDownload, Loader2, Lock, Pause, Play, RefreshCw, Settings2, Square, Trash2 } from "lucide-react";
+import { AlertCircle, ArrowLeft, ChevronLeft, ChevronRight, HardDriveDownload, Loader2, Pause, Play, RefreshCw, Settings2, Square, Trash2 } from "lucide-react";
 import { useCrypto } from "@/hooks/use-crypto";
 import { PassphraseGate } from "@/components/passphrase-gate";
 import { MetaCard } from "@/components/meta-card";
@@ -16,6 +16,14 @@ import type { ProgressiveMetaFile } from "@/types";
 
 const PAGE_SIZE = 24;
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Local operation failed.";
+interface ConfirmAction {
+  label: string;
+  action: () => Promise<void>;
+  title?: string;
+  description?: string;
+  confirmLabel?: string;
+}
+
 const stageText = {
   queued: "Queued", preparing: "Resolving Drive files", saving: "Saving ciphertext",
   verifying: "Verifying saved bytes", failed: "Download failed",
@@ -28,7 +36,7 @@ function bytes(value: number) {
   return `${(value / 1024 ** power).toLocaleString(undefined, { maximumFractionDigits: 1 })} ${units[power - 1]}`;
 }
 
-function TransferRow({ transfer, onPause, onDiscard }: { transfer: LocalTransfer; onPause: () => void; onDiscard: () => void }) {
+function TransferRow({ transfer, onPause, onDiscard, busy }: { transfer: LocalTransfer; onPause: () => void; onDiscard: () => void; busy: boolean }) {
   const percent = transfer.total ? Math.min(100, Math.floor(transfer.bytes * 100 / transfer.total)) : 0;
   const canPause = transfer.stage !== "verifying" && transfer.stage !== "failed";
   return (
@@ -44,8 +52,8 @@ function TransferRow({ transfer, onPause, onDiscard }: { transfer: LocalTransfer
         )}
       </div>
       <div className="flex gap-2">
-        {canPause && <Button variant="outline" size="sm" onClick={onPause}><Pause className="size-3.5" />Pause</Button>}
-        {transfer.stage !== "verifying" && <Button variant="ghost" size="sm" onClick={onDiscard}>
+        {canPause && <Button variant="outline" size="sm" disabled={busy} onClick={onPause}><Pause className="size-3.5" />Pause</Button>}
+        {transfer.stage !== "verifying" && <Button variant="ghost" size="sm" disabled={busy} onClick={onDiscard}>
           {transfer.stage === "failed" && !transfer.entryId ? "Dismiss" : "Discard"}
         </Button>}
       </div>
@@ -54,7 +62,7 @@ function TransferRow({ transfer, onPause, onDiscard }: { transfer: LocalTransfer
 }
 
 export function LocalDownloadsPage() {
-  const { hasPassphrase, clearPassphrase, authenticatedEmail } = useCrypto();
+  const { hasPassphrase, authenticatedEmail } = useCrypto();
   const { openSettings } = useLocalDownloadActions();
   const { directoryName, directoryAvailable, refresh, loading, error } = useLocalDownloads();
   const [offlineReady, setOfflineReady] = useState(false);
@@ -76,7 +84,6 @@ export function LocalDownloadsPage() {
             <HardDriveDownload className="size-4" /> Downloads
           </span>
           <div className="ml-auto flex gap-2">
-            {hasPassphrase && <Button variant="ghost" size="sm" onClick={() => clearPassphrase()}><Lock className="size-3.5" /> Lock</Button>}
             <Button variant="outline" size="sm" onClick={openSettings}><Settings2 className="size-3.5" /> Settings</Button>
           </div>
         </nav>
@@ -123,12 +130,14 @@ export function LocalDownloadsPage() {
 function Library() {
   const { hasPassphrase, keyVersion, getPassphrase, registerSensitiveCleanup } = useCrypto();
   const { enqueue } = useLocalDownloadActions();
-  const { entries, transfers, playingInVlc, loading, pause, discard, remove, readMeta, readPrefix, play, stopPlayback, rescanVersion } = useLocalDownloads();
+  const { entries, transfers, playingInVlc, loading, pause, discard, remove, removeMany, removeAll, readMeta, readPrefix, play, stopPlayback, rescanVersion } = useLocalDownloads();
   const [page, setPage] = useState(0);
   const [oldestFirst, setOldestFirst] = useState(true);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [resolved, setResolved] = useState<Record<string, ProgressiveMetaFile>>({});
   const [inspect, setInspect] = useState<string | null>(null);
-  const [confirm, setConfirm] = useState<{ label: string; action: () => Promise<void> } | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmAction | null>(null);
   const [working, setWorking] = useState(false);
   const [opening, setOpening] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
@@ -136,6 +145,10 @@ function Library() {
   const ordered = useMemo(() => [...entries].sort((a, b) =>
     (oldestFirst ? a.addedAt - b.addedAt : b.addedAt - a.addedAt) || a.id.localeCompare(b.id)
   ), [entries, oldestFirst]);
+  const selectedEntryIds = useMemo(
+    () => new Set(entries.filter((entry) => selectedIds.has(entry.id)).map((entry) => entry.id)),
+    [entries, selectedIds]
+  );
   const pages = Math.max(1, Math.ceil(ordered.length / PAGE_SIZE));
   const currentPage = Math.min(page, pages - 1);
   const visible = useMemo(() => ordered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE), [ordered, currentPage]);
@@ -179,6 +192,8 @@ function Library() {
       setConfirm(null);
       setNotice("");
       setOperationError("");
+      setSelectionMode(false);
+      setSelectedIds(new Set());
     });
     queueMicrotask(() => {
       if (controller.signal.aborted) return;
@@ -210,6 +225,52 @@ function Library() {
     catch (error) { setOperationError(errorText(error)); }
     finally { setWorking(false); }
   };
+  const requestDeleteSelected = () => {
+    const ids = [...selectedEntryIds];
+    if (working || ids.length === 0) return;
+    const removed = new Set(ids);
+    const count = ids.length;
+    setConfirm({
+      label: `${count} selected local ${count === 1 ? "download" : "downloads"}`,
+      title: "Delete selected downloads?",
+      description: "This removes the selected encrypted files from this computer only. Files in Google Drive are unchanged.",
+      confirmLabel: `Delete ${count} local ${count === 1 ? "copy" : "copies"}`,
+      action: async () => {
+        const removedCount = await removeMany(ids);
+        setSelectedIds((current) => new Set([...current].filter((id) => !removed.has(id))));
+        setNotice(`Deleted ${removedCount} local ${removedCount === 1 ? "download" : "downloads"}.`);
+      },
+    });
+  };
+  const requestDeleteAll = () => {
+    const entryCount = entries.length;
+    const queuedCount = transferList.filter((transfer) => transfer.stage === "queued").length;
+    const activeCount = transferList.filter((transfer) => transfer.stage === "preparing" || transfer.stage === "saving" || transfer.stage === "verifying").length;
+    const failedCount = transferList.filter((transfer) => transfer.stage === "failed").length;
+    if (working || (entryCount === 0 && transferList.length === 0)) return;
+    const transferSummary = [
+      queuedCount > 0 ? `${queuedCount} queued transfer${queuedCount === 1 ? "" : "s"} will be cleared.` : "",
+      activeCount > 0 ? `${activeCount} active transfer${activeCount === 1 ? "" : "s"} will be paused or canceled.` : "",
+      failedCount > 0 ? `${failedCount} failed transfer${failedCount === 1 ? "" : "s"} will be cleared.` : "",
+    ].filter(Boolean).join(" ");
+    const description = [
+      `This removes all ${entryCount} local library ${entryCount === 1 ? "entry" : "entries"} from this computer only.`,
+      transferSummary,
+      "Google Drive files are unchanged.",
+    ].filter(Boolean).join(" ");
+    setConfirm({
+      label: `${entryCount} local ${entryCount === 1 ? "download" : "downloads"}`,
+      title: "Delete all local downloads?",
+      description,
+      confirmLabel: "Delete all local copies",
+      action: async () => {
+        const removedCount = await removeAll();
+        setSelectedIds(new Set());
+        setSelectionMode(false);
+        setNotice(`Deleted ${removedCount} local ${removedCount === 1 ? "download" : "downloads"}.`);
+      },
+    });
+  };
   const stopCard = (event: MouseEvent) => event.stopPropagation();
   const detail = inspect ? resolved[inspect] : null;
   const transferList = Object.values(transfers);
@@ -223,6 +284,7 @@ function Library() {
       {transferList.length > 0 && <section aria-label="Encrypted transfers" className="space-y-2">
         <h2 className="text-sm font-medium">Encrypted transfers</h2>
         {transferList.map((transfer) => <TransferRow key={transfer.metaFileId} transfer={transfer}
+          busy={working}
           onPause={() => void pause(transfer.metaFileId).catch((error) => setOperationError(errorText(error)))}
           onDiscard={() => transfer.stage === "failed" && !transfer.entryId
             ? void discard(transfer.metaFileId)
@@ -234,7 +296,25 @@ function Library() {
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/8 pb-3">
         <p className="text-xs text-muted-foreground">{completed.length} saved · {ordered.length - completed.length} incomplete</p>
         <div className="flex flex-wrap items-center gap-2">
-          {playingInVlc && <Button size="sm" variant="outline" onClick={() => {
+          <Button size="sm" variant="outline" disabled={working} onClick={() => {
+            if (selectionMode) {
+              setSelectionMode(false);
+              setSelectedIds(new Set());
+            } else {
+              setSelectionMode(true);
+            }
+          }}>{selectionMode ? "Done" : "Select"}</Button>
+          {selectionMode && <>
+            <Button size="sm" variant="outline" disabled={working || entries.length === 0}
+              onClick={() => setSelectedIds(new Set(entries.map((entry) => entry.id)))}>Select all</Button>
+            <Button size="sm" variant="outline" disabled={working || selectedEntryIds.size === 0}
+              onClick={() => setSelectedIds(new Set())}>Clear selection</Button>
+            <Button size="sm" variant="destructive" disabled={working || selectedEntryIds.size === 0}
+              onClick={requestDeleteSelected}>Delete selected ({selectedEntryIds.size})</Button>
+          </>}
+          <Button size="sm" variant="destructive" disabled={working || (entries.length === 0 && transferList.length === 0)}
+            onClick={requestDeleteAll}>Delete all</Button>
+          {playingInVlc && <Button size="sm" variant="outline" disabled={working} onClick={() => {
             void stopPlayback().then(() => setNotice("VLC session closed."), (error) => setOperationError(errorText(error)));
           }}><Square className="size-3.5" /> Stop VLC</Button>}
           <label className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -255,7 +335,21 @@ function Library() {
             const loaded = entry.metaBytes === entry.pair.meta.size;
             const canResume = entry.status !== "complete" && !entry.remoteDeleted && !managed;
             const title = file.details?.name || "Encrypted download";
-            return <MetaCard key={entry.id} meta={file} onClick={() => setInspect(entry.id)} local={{ footer: (
+            return <MetaCard key={entry.id} meta={file} isSelectionMode={selectionMode}
+              isSelected={selectedEntryIds.has(entry.id)} onClick={() => {
+                if (working) return;
+                if (!selectionMode) {
+                  setInspect(entry.id);
+                  return;
+                }
+                const validIds = new Set(entries.map((item) => item.id));
+                setSelectedIds((current) => {
+                  const next = new Set([...current].filter((id) => validIds.has(id)));
+                  if (next.has(entry.id)) next.delete(entry.id);
+                  else next.add(entry.id);
+                  return next;
+                });
+              }} local={{ footer: (
               <div className="mt-auto space-y-2 border-t border-white/8 pt-2" onClick={stopCard}
                 onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") event.stopPropagation(); }}>
                 <p className="text-[11px] text-muted-foreground">
@@ -266,13 +360,13 @@ function Library() {
                 {entry.error && !managed && <p className="text-[11px] text-amber-200">{entry.error}</p>}
                 <div className="flex flex-wrap items-center gap-2">
                   {entry.status === "complete" && <Button size="sm" variant="outline"
-                    disabled={!!opening || !file.details}
+                    disabled={working || !!opening || !file.details}
                     onClick={() => void playing(entry.id)}>
                     {opening === entry.id ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />} Play in VLC
                   </Button>}
-                  {canResume && <Button size="sm" variant="outline"
+                  {canResume && <Button size="sm" variant="outline" disabled={working}
                     onClick={() => enqueue([{ metaFileId: entry.pair.meta.id, name: title, resume: entry }])}>Resume</Button>}
-                  {!managed && <Button size="sm" variant="ghost" aria-label="Delete local download" title="Delete local download"
+                  {!managed && <Button size="sm" variant="ghost" disabled={working} aria-label="Delete local download" title="Delete local download"
                     onClick={() => setConfirm({ label: title, action: () => remove(entry.id) })}>
                     <Trash2 className="size-3.5" />
                   </Button>}
@@ -312,15 +406,15 @@ function Library() {
       <Dialog open={!!confirm} onOpenChange={(open) => { if (!open && !working) setConfirm(null); }}>
         <DialogContent showCloseButton={!working} className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Delete local download?</DialogTitle>
-            <DialogDescription>This removes the encrypted payload and metadata from this computer only. Files in Google Drive are unchanged.</DialogDescription>
+            <DialogTitle>{confirm?.title ?? "Delete local download?"}</DialogTitle>
+            <DialogDescription>{confirm?.description ?? "This removes the encrypted payload and metadata from this computer only. Files in Google Drive are unchanged."}</DialogDescription>
           </DialogHeader>
           <p className="break-all text-sm">{confirm?.label}</p>
           {operationError && <p role="alert" className="text-sm text-red-300">{operationError}</p>}
           <div className="flex justify-end gap-2">
             <Button variant="ghost" disabled={working} onClick={() => setConfirm(null)}>Keep files</Button>
             <Button variant="destructive" disabled={working} onClick={() => void confirmAction()}>
-              {working ? "Deleting…" : "Delete local copy"}
+              {working ? "Deleting…" : confirm?.confirmLabel ?? "Delete local copy"}
             </Button>
           </div>
         </DialogContent>

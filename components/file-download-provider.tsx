@@ -6,9 +6,10 @@ import { openRandomAccessAgeReader, type RandomAccessAgeReader } from "@/lib/ran
 import { PayloadTransportError } from "@/lib/direct-payload-source";
 import {
   DEFAULT_DOWNLOAD_SETTINGS,
+  DOWNLOAD_SETTINGS_CHANGED_EVENT,
   DOWNLOAD_SETTINGS_STORAGE_KEY,
   isDownloadSettingValue,
-  parseDownloadSettings,
+  readDownloadSettings,
   type DownloadSettings,
 } from "@/lib/download-settings";
 import { runParallelDownload } from "@/lib/parallel-download";
@@ -263,20 +264,12 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
   useEffect(() => {
     let mounted = true;
     queueMicrotask(() => {
-      try {
-        const stored = window.localStorage.getItem(DOWNLOAD_SETTINGS_STORAGE_KEY);
-        if (mounted && stored !== null) {
-          const loaded = parseDownloadSettings(JSON.parse(stored));
-          settingsRef.current = loaded;
-          setDownloadSettingsState(loaded);
-        }
-      } catch {
-        // Blocked or malformed preferences leave the in-memory defaults active.
-      } finally {
-        if (mounted) {
-          settingsLoadedRef.current = true;
-          pumpRef.current();
-        }
+      const loaded = readDownloadSettings();
+      if (mounted) {
+        settingsRef.current = loaded;
+        setDownloadSettingsState(loaded);
+        settingsLoadedRef.current = true;
+        pumpRef.current();
       }
     });
     return () => { mounted = false; };
@@ -297,10 +290,13 @@ export function FileDownloadProvider({ children }: { children: React.ReactNode }
     };
     settingsRef.current = next;
     setDownloadSettingsState(next);
-    try {
-      window.localStorage.setItem(DOWNLOAD_SETTINGS_STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      // Preferences still apply for this provider lifetime when storage is blocked.
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(DOWNLOAD_SETTINGS_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // Preferences still apply for this provider lifetime when storage is blocked.
+      }
+      window.dispatchEvent(new CustomEvent(DOWNLOAD_SETTINGS_CHANGED_EVENT, { detail: { ...next } }));
     }
     pumpRef.current();
   }, []);

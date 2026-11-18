@@ -77,10 +77,11 @@ export function DownloadSettingsDialog({ isOpen, onClose }: DownloadSettingsDial
 
         <div className="space-y-2 rounded-lg border border-white/8 bg-white/3 p-3 text-xs leading-relaxed text-muted-foreground">
           <p className="font-medium text-foreground">
-            {downloadSettings.parallelDownloads} files × {downloadSettings.requestsPerDownload} requests = up to {downloadSettings.parallelDownloads * downloadSettings.requestsPerDownload} concurrent payload requests.
+            Normal downloads: {downloadSettings.parallelDownloads} files × {downloadSettings.requestsPerDownload} requests = up to {downloadSettings.parallelDownloads * downloadSettings.requestsPerDownload} concurrent payload requests.
           </p>
+          <p>Encrypted downloads use the same parallel file limit in a separate queue, with one streaming request per file.</p>
           <p>Lower limits let in-flight work finish. New ranges use the updated limit when the read window refills. Higher counts are not guaranteed to be faster.</p>
-          <p>Only these preferences are stored in browser storage. Download sessions stay in memory; reload, reopening, or vault lock ends the ability to resume. If storage is blocked, settings still apply until this page closes.</p>
+          <p>Normal download sessions stay in memory; reload, reopening, or vault lock ends the ability to resume. Encrypted downloads keep their saved progress on disk. If browser storage is blocked, settings still apply until this page closes.</p>
         </div>
 
         <div className="flex justify-between gap-2 pt-1">

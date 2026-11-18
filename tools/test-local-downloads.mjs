@@ -27,6 +27,7 @@ const { LocalDownloadBridge, randomLocalId } = await import("../lib/local-downlo
 const { LocalDownloadLibrary } = await import("../lib/local-download-library.ts");
 const { copyEncryptedPart, transferEncryptedDownload } = await import("../lib/encrypted-download.ts");
 const { createDirectPayloadSource, createEncryptedPayloadSource } = await import("../lib/direct-payload-source.ts");
+const { DEFAULT_DOWNLOAD_SETTINGS, DOWNLOAD_SETTINGS_STORAGE_KEY, readDownloadSettings } = await import("../lib/download-settings.ts");
 const { deriveAgeIdentity, encryptMetaZip } = await import("../lib/crypto.ts");
 const { decryptLocalMetadata } = await import("../lib/local-library-metadata.ts");
 const { createResumablePayloadContext, createResumableEncryptedPayloadStream, encryptedPayloadSize } = await import("../lib/resumable-payload.ts");
@@ -153,6 +154,57 @@ function driveFixture() {
     },
   };
 }
+
+test("download settings reuse the saved parallel limit with safe defaults", () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  try {
+    delete globalThis.window;
+    assert.deepEqual(readDownloadSettings(), DEFAULT_DOWNLOAD_SETTINGS);
+    for (const [stored, expected] of [
+      [null, DEFAULT_DOWNLOAD_SETTINGS],
+      ["invalid JSON", DEFAULT_DOWNLOAD_SETTINGS],
+      [JSON.stringify({ parallelDownloads: 6 }), { ...DEFAULT_DOWNLOAD_SETTINGS, parallelDownloads: 6 }],
+      [JSON.stringify({ parallelDownloads: 0, requestsPerDownload: 99 }), DEFAULT_DOWNLOAD_SETTINGS],
+      [JSON.stringify({ parallelDownloads: 1, requestsPerDownload: 6 }), { parallelDownloads: 1, requestsPerDownload: 6 }],
+    ]) {
+      Object.defineProperty(globalThis, "window", { configurable: true, value: {
+        localStorage: { getItem(key) { assert.equal(key, DOWNLOAD_SETTINGS_STORAGE_KEY); return stored; } },
+      } });
+      assert.deepEqual(readDownloadSettings(), expected);
+    }
+    Object.defineProperty(globalThis, "window", { configurable: true, value: {
+      get localStorage() { throw new Error("Storage unavailable"); },
+    } });
+    assert.deepEqual(readDownloadSettings(), DEFAULT_DOWNLOAD_SETTINGS);
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else delete globalThis.window;
+  }
+});
+
+test("local deletion preserves other downloads, folder identity, and unrelated files", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "vaultdrive-delete-test-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  const library = new LocalDownloadLibrary(folderHandle(directory));
+  const drive = driveFixture();
+  const pair = drive.add("first", "v1", Buffer.from("meta"), Buffer.from("payload")).manifest;
+  const { localDownloadId } = await import("../lib/local-download-library.ts");
+  const firstId = await localDownloadId(pair);
+  await library.begin(firstId, pair, false);
+  const secondPair = drive.add("second", "v1", Buffer.from("meta"), Buffer.from("payload")).manifest;
+  const secondId = await localDownloadId(secondPair);
+  await library.begin(secondId, secondPair, false);
+  const marker = await library.folderKey();
+  const unrelated = join(directory, ".vaultdrive-downloads", firstId, "keep.txt");
+  await writeFile(unrelated, "Unrelated user file");
+  await library.remove(firstId);
+  assert.deepEqual((await library.list()).map((entry) => entry.id), [secondId]);
+  assert.equal(await readFile(unrelated, "utf8"), "Unrelated user file");
+  await library.remove(secondId);
+  assert.deepEqual(await library.list(), []);
+  assert.equal(await library.folderKey(), marker);
+  assert.equal(drive.calls.length, 0, "local deletion must not contact Drive");
+});
 
 test("stream checkpoint rejects extra or missing bytes without manufacturing progress", async () => {
   const write = async (bytes, offset) => offset + bytes.length;

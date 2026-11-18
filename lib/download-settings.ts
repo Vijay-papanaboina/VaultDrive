@@ -4,6 +4,7 @@ export interface DownloadSettings {
 }
 
 export const DOWNLOAD_SETTINGS_STORAGE_KEY = "vaultdrive.download-settings.v1";
+export const DOWNLOAD_SETTINGS_CHANGED_EVENT = "vaultdrive:download-settings-changed";
 export const DOWNLOAD_SETTINGS_MIN_VALUE = 1;
 export const DOWNLOAD_SETTINGS_MAX_VALUE = 6;
 
@@ -31,4 +32,16 @@ export function parseDownloadSettings(value: unknown): DownloadSettings {
       ? fields.requestsPerDownload
       : DEFAULT_DOWNLOAD_SETTINGS.requestsPerDownload,
   };
+}
+
+export function readDownloadSettings(): DownloadSettings {
+  if (typeof window === "undefined") return { ...DEFAULT_DOWNLOAD_SETTINGS };
+  try {
+    const stored = window.localStorage.getItem(DOWNLOAD_SETTINGS_STORAGE_KEY);
+    return stored === null
+      ? { ...DEFAULT_DOWNLOAD_SETTINGS }
+      : parseDownloadSettings(JSON.parse(stored));
+  } catch {
+    return { ...DEFAULT_DOWNLOAD_SETTINGS };
+  }
 }

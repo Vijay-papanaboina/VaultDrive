@@ -13,8 +13,14 @@ import {
 } from "@/lib/local-download-library";
 import type { LocalDownload } from "@/lib/local-download-types";
 import { LocalDownloadSettings, VlcPlaybackSetup } from "@/components/local-download-settings";
+import {
+  DEFAULT_DOWNLOAD_SETTINGS,
+  DOWNLOAD_SETTINGS_CHANGED_EVENT,
+  DOWNLOAD_SETTINGS_STORAGE_KEY,
+  parseDownloadSettings,
+  readDownloadSettings,
+} from "@/lib/download-settings";
 
-const PARALLEL_FILES = 2;
 type TransferStage = "queued" | "preparing" | "saving" | "verifying" | "failed";
 export interface LocalTransfer {
   metaFileId: string;
@@ -55,6 +61,8 @@ interface LocalLibrary {
   pause(metaFileId: string): Promise<void>;
   discard(metaFileId: string): Promise<void>;
   remove(id: string): Promise<void>;
+  removeMany(ids: string[]): Promise<number>;
+  removeAll(): Promise<number>;
   readMeta(entry: LocalDownload, signal: AbortSignal): Promise<Uint8Array>;
   readPrefix(entry: LocalDownload, signal: AbortSignal): Promise<Uint8Array>;
   play(ids: string[], selected: string): Promise<number | null>;
@@ -77,6 +85,9 @@ export function LocalDownloadProvider({ children }: { children: ReactNode }) {
   const storedDirectory = useRef<Promise<LocalDownloadLibrary | null> | null>(null);
   const waitingForDirectory = useRef(new Map<string, EncryptedDownloadTarget>());
   const jobs = useRef(new Map<string, TransferJob>());
+  const parallelDownloadsRef = useRef(DEFAULT_DOWNLOAD_SETTINGS.parallelDownloads);
+  const pumpRef = useRef<() => void>(() => undefined);
+  const deleting = useRef(false);
   const generation = useRef(0);
   const scans = useRef(0);
   const [entries, setEntries] = useState<LocalDownload[]>([]);
@@ -155,8 +166,10 @@ export function LocalDownloadProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const pump = useCallback(function pumpQueue() {
+    if (deleting.current) return;
     const active = Array.from(jobs.current.values()).filter((job) => job.active).length;
-    const ready = Array.from(jobs.current.entries()).filter(([, job]) => !job.active).slice(0, PARALLEL_FILES - active);
+    const capacity = Math.max(0, parallelDownloadsRef.current - active);
+    const ready = Array.from(jobs.current.entries()).filter(([, job]) => !job.active).slice(0, capacity);
     for (const [key, job] of ready) {
       function current() { return jobs.current.get(key) === job && job.generation === generation.current; }
       const apply = (patch: Partial<LocalTransfer>) => { if (current()) update(key, patch); };
@@ -192,6 +205,34 @@ export function LocalDownloadProvider({ children }: { children: ReactNode }) {
       })();
     }
   }, [clearTransfer, refresh, update]);
+  useEffect(() => { pumpRef.current = pump; }, [pump]);
+
+  useEffect(() => {
+    const updateParallelLimit = (parallelDownloads: number) => {
+      const previous = parallelDownloadsRef.current;
+      parallelDownloadsRef.current = parallelDownloads;
+      if (parallelDownloads > previous) pumpRef.current();
+    };
+    const readSavedSettings = () => {
+      updateParallelLimit(readDownloadSettings().parallelDownloads);
+    };
+    const onSettingsChanged = (event: Event) => {
+      const settings = parseDownloadSettings((event as CustomEvent<unknown>).detail);
+      updateParallelLimit(settings.parallelDownloads);
+    };
+    const onStorageChanged = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== DOWNLOAD_SETTINGS_STORAGE_KEY) return;
+      readSavedSettings();
+    };
+
+    readSavedSettings();
+    window.addEventListener(DOWNLOAD_SETTINGS_CHANGED_EVENT, onSettingsChanged);
+    window.addEventListener("storage", onStorageChanged);
+    return () => {
+      window.removeEventListener(DOWNLOAD_SETTINGS_CHANGED_EVENT, onSettingsChanged);
+      window.removeEventListener("storage", onStorageChanged);
+    };
+  }, []);
 
   const queueReady = useCallback(async () => {
     const currentGeneration = generation.current;
@@ -199,6 +240,7 @@ export function LocalDownloadProvider({ children }: { children: ReactNode }) {
       const library = await getStorage();
       const access = await library?.queryAccess();
       if (currentGeneration !== generation.current) return;
+      if (deleting.current) return;
       if (!library || access !== "granted") {
         setDirectoryName(library?.directory.name ?? null);
         setDirectoryAvailable(false);
@@ -247,14 +289,58 @@ export function LocalDownloadProvider({ children }: { children: ReactNode }) {
     await refresh();
   }, [pause, clearTransfer, refresh]);
 
-  const remove = useCallback(async (id: string) => {
-    const library = await getStorage();
-    if (!library) return;
-    await library.remove(id);
-    setEntries((old) => old.filter((entry) => entry.id !== id));
-    setTransfers((old) => Object.fromEntries(Object.entries(old).filter(([, transfer]) => transfer.entryId !== id)));
-    await refresh();
-  }, [getStorage, refresh]);
+  const deleteEntries = useCallback(async (ids?: string[]) => {
+    if (deleting.current) throw new Error("A local deletion is already in progress.");
+    deleting.current = true;
+    const removed = new Set<string>();
+    try {
+      const library = await getStorage();
+      if (!library) throw new Error("Choose the download folder first.");
+      const targets = ids ? new Set(ids) : null;
+      if (!targets) {
+        waitingForDirectory.current.clear();
+        setTransfers({});
+      }
+      else for (const [key, target] of waitingForDirectory.current) {
+        if (target.resume && targets.has(target.resume.id)) waitingForDirectory.current.delete(key);
+      }
+      const matching = Array.from(jobs.current.entries()).filter(([, job]) =>
+        job.storage === library && (!targets || (job.entryId && targets.has(job.entryId)))
+      );
+      for (const [key, job] of matching) {
+        if (!job.verifying) job.stop.abort();
+        if (!job.active) jobs.current.delete(key);
+        clearTransfer(key);
+      }
+      // Writers must close before deleting their files; keep the queue paused.
+      await Promise.all(matching.map(([, job]) => job.active));
+      const targetIds = targets ?? new Set((await library.list()).map((entry) => entry.id));
+      const failures: unknown[] = [];
+      for (const id of targetIds) {
+        try {
+          await library.remove(id);
+          removed.add(id);
+        } catch (error) {
+          if (error instanceof DOMException && error.name === "NotFoundError") removed.add(id);
+          else failures.push(error);
+        }
+      }
+      if (failures.length) {
+        throw new Error(`Deleted ${removed.size} of ${targetIds.size} local downloads. ${failures.length} could not be deleted: ${localDownloadMessage(failures[0])}`);
+      }
+      return removed.size;
+    } finally {
+      setEntries((old) => old.filter((entry) => !removed.has(entry.id)));
+      setTransfers((old) => Object.fromEntries(Object.entries(old).filter(([, transfer]) => !transfer.entryId || !removed.has(transfer.entryId))));
+      await refresh();
+      deleting.current = false;
+      void queueReady();
+    }
+  }, [clearTransfer, getStorage, queueReady, refresh]);
+
+  const removeMany = useCallback((ids: string[]) => deleteEntries(ids), [deleteEntries]);
+  const removeAll = useCallback(() => deleteEntries(), [deleteEntries]);
+  const remove = useCallback(async (id: string) => { await deleteEntries([id]); }, [deleteEntries]);
 
   const readMeta = useCallback(async (entry: LocalDownload, signal: AbortSignal) => {
     const library = await getStorage();
@@ -353,6 +439,7 @@ export function LocalDownloadProvider({ children }: { children: ReactNode }) {
   };
 
   const chooseDirectory = async () => {
+    if (deleting.current) throw new Error("Wait for local deletion to finish before changing the folder.");
     if (jobs.current.size) throw new Error("Pause encrypted downloads before changing the folder.");
     const directory = await pickEncryptedDirectory(storage.current?.directory);
     await rememberEncryptedDirectory(directory);
@@ -389,7 +476,7 @@ export function LocalDownloadProvider({ children }: { children: ReactNode }) {
   return (
     <LocalActionsContext.Provider value={actions}>
       <LocalLibraryContext.Provider value={{ entries, transfers, directoryName, directoryAvailable, playingInVlc, error, loading, rescanVersion,
-        refresh, pause, discard, remove, readMeta, readPrefix, play, stopPlayback: revokePlayback }}>
+        refresh, pause, discard, remove, removeMany, removeAll, readMeta, readPrefix, play, stopPlayback: revokePlayback }}>
         {children}
         {settingsOpen && <LocalDownloadSettings
           onClose={() => { waitingForDirectory.current.clear(); setSettingsOpen(false); }}
