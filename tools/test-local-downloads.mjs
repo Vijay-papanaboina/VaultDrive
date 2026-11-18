@@ -206,6 +206,64 @@ test("local deletion preserves other downloads, folder identity, and unrelated f
   assert.equal(drive.calls.length, 0, "local deletion must not contact Drive");
 });
 
+test("a failed session can be retried using the same encrypted download target", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "vaultdrive-retry-test-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  const library = new LocalDownloadLibrary(folderHandle(directory));
+  const drive = driveFixture();
+  const pair = drive.add("retry_session", "v1", Buffer.from("encrypted meta"), Buffer.from("encrypted payload"));
+  const target = { metaFileId: pair.manifest.meta.id, name: "Retained target" };
+  const callbacks = { entry() {}, progress() {}, verify() {} };
+  let online = false;
+  const run = () => transferEncryptedDownload(target, library, callbacks, new AbortController().signal,
+    (id, signal) => createEncryptedPayloadSource(id, { signal, fetchImpl: (input, init) => {
+      if (!online) throw new TypeError("Failed to fetch");
+      return drive.fetch(input, init);
+    } }));
+  await assert.rejects(run(), /Could not create a direct download session/);
+  assert.deepEqual(await library.list(), []);
+  online = true;
+  const completed = await run();
+  assert.equal(completed.status, "complete");
+  const saved = join(directory, ".vaultdrive-downloads", completed.id);
+  assert.deepEqual(await readFile(join(saved, "original.meta")), pair.meta);
+  assert.deepEqual(await readFile(join(saved, "payload.age")), pair.payload);
+});
+
+test("network failure resumes encrypted bytes from disk using a fresh session", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "vaultdrive-resume-test-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  const library = new LocalDownloadLibrary(folderHandle(directory));
+  const drive = driveFixture();
+  const pair = drive.add("retry_stream", "v1", Buffer.from("encrypted meta"), Buffer.alloc(firstChunk + 1024, 0x94));
+  let failPayload = true;
+  const fetchImpl = async (input, init) => {
+    const response = await drive.fetch(input, init);
+    if (!failPayload || !new URL(input, origin).pathname.endsWith("retry_stream_payload")) return response;
+    await response.body.cancel();
+    let sent = false;
+    return new Response(new ReadableStream({
+      pull(controller) {
+        if (sent) controller.error(new TypeError("Network error"));
+        else { sent = true; controller.enqueue(new Uint8Array(pair.payload.subarray(0, firstChunk))); }
+      },
+    }), { status: response.status, headers: response.headers });
+  };
+  const run = (resume) => transferEncryptedDownload({ metaFileId: pair.manifest.meta.id, name: "Interrupted file", resume },
+    library, { entry() {}, progress() {}, verify() {} }, new AbortController().signal,
+    (id, signal) => createEncryptedPayloadSource(id, { signal, fetchImpl }));
+  await assert.rejects(run(), /Network error/);
+  const [partial] = await library.list();
+  assert.equal(partial.status, "failed");
+  assert.equal(partial.payloadBytes, firstChunk);
+  failPayload = false;
+  const completed = await run(partial);
+  assert.equal(completed.status, "complete");
+  assert.equal(drive.calls.filter((call) => call.host === new URL(origin).host).length, 2, "retry must create a fresh session");
+  assert.ok(drive.calls.some((call) => call.id === "retry_stream_payload" && call.range?.startsWith(`bytes=${firstChunk}-`)));
+  assert.deepEqual(await readFile(join(directory, ".vaultdrive-downloads", completed.id, "payload.age")), pair.payload);
+});
+
 test("stream checkpoint rejects extra or missing bytes without manufacturing progress", async () => {
   const write = async (bytes, offset) => offset + bytes.length;
   const signal = new AbortController().signal;

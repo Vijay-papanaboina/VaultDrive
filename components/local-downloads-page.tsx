@@ -36,7 +36,7 @@ function bytes(value: number) {
   return `${(value / 1024 ** power).toLocaleString(undefined, { maximumFractionDigits: 1 })} ${units[power - 1]}`;
 }
 
-function TransferRow({ transfer, onPause, onDiscard, busy }: { transfer: LocalTransfer; onPause: () => void; onDiscard: () => void; busy: boolean }) {
+function TransferRow({ transfer, onPause, onRetry, onDiscard, busy }: { transfer: LocalTransfer; onPause: () => void; onRetry: () => void; onDiscard: () => void; busy: boolean }) {
   const percent = transfer.total ? Math.min(100, Math.floor(transfer.bytes * 100 / transfer.total)) : 0;
   const canPause = transfer.stage !== "verifying" && transfer.stage !== "failed";
   return (
@@ -53,6 +53,9 @@ function TransferRow({ transfer, onPause, onDiscard, busy }: { transfer: LocalTr
       </div>
       <div className="flex gap-2">
         {canPause && <Button variant="outline" size="sm" disabled={busy} onClick={onPause}><Pause className="size-3.5" />Pause</Button>}
+        {transfer.stage === "failed" && <Button variant="outline" size="sm" disabled={busy} onClick={onRetry}>
+          {transfer.entryId ? "Resume" : "Retry"}
+        </Button>}
         {transfer.stage !== "verifying" && <Button variant="ghost" size="sm" disabled={busy} onClick={onDiscard}>
           {transfer.stage === "failed" && !transfer.entryId ? "Dismiss" : "Discard"}
         </Button>}
@@ -274,6 +277,21 @@ function Library() {
   const stopCard = (event: MouseEvent) => event.stopPropagation();
   const detail = inspect ? resolved[inspect] : null;
   const transferList = Object.values(transfers);
+  const failedTransfers = transferList.filter((transfer) => transfer.stage === "failed");
+  const retryTransfers = (failed: LocalTransfer[]) => {
+    if (working || failed.length === 0) return;
+    setOperationError("");
+    setNotice("");
+    const entriesById = new Map(entries.map((entry) => [entry.id, entry] as const));
+    enqueue(failed.map((transfer) => {
+      const resume = transfer.entryId ? entriesById.get(transfer.entryId) : undefined;
+      return {
+        metaFileId: transfer.metaFileId,
+        name: transfer.name,
+        ...(resume ? { resume } : {}),
+      };
+    }));
+  };
   if (!hasPassphrase) return null;
 
   return (
@@ -282,9 +300,14 @@ function Library() {
         {operationError || notice}
       </p>}
       {transferList.length > 0 && <section aria-label="Encrypted transfers" className="space-y-2">
-        <h2 className="text-sm font-medium">Encrypted transfers</h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-sm font-medium">Encrypted transfers</h2>
+          {failedTransfers.length > 0 && <Button variant="outline" size="sm" disabled={working}
+            onClick={() => retryTransfers(failedTransfers)}>Retry failed ({failedTransfers.length})</Button>}
+        </div>
         {transferList.map((transfer) => <TransferRow key={transfer.metaFileId} transfer={transfer}
           busy={working}
+          onRetry={() => retryTransfers([transfer])}
           onPause={() => void pause(transfer.metaFileId).catch((error) => setOperationError(errorText(error)))}
           onDiscard={() => transfer.stage === "failed" && !transfer.entryId
             ? void discard(transfer.metaFileId)
